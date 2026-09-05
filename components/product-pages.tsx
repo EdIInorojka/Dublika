@@ -51,6 +51,7 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from '@/components/ui/sidebar';
+import { apiFetch } from '@/lib/local-api';
 
 export type Navigate = (path: string) => void;
 
@@ -258,16 +259,39 @@ function AuthPage(props: PageProps) {
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
   const [error, setError] = useState('');
+  const [devCode, setDevCode] = useState('241806');
+  const [submitting, setSubmitting] = useState(false);
   const next = new URLSearchParams(props.route.split('?')[1] ?? '').get('next') || '/studio';
 
-  function sendCode() {
+  async function sendCode() {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setError('Введите корректную почту'); return; }
-    setError(''); setStep('code'); props.notify(`Код отправлен на ${email}`);
+    setSubmitting(true);
+    try {
+      const result = await apiFetch<{ devCode: string }>('/auth/request-code', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) });
+      setDevCode(result.devCode);
+      setError('');
+      setStep('code');
+      props.notify(`Код создан локально для ${email}`);
+    } catch {
+      setDevCode('241806');
+      setError('');
+      setStep('code');
+      props.notify('В опубликованном демо используйте код 241806. Для реальной обработки запустите локальную версию.');
+    } finally { setSubmitting(false); }
   }
 
-  function verify() {
-    if (code !== '241806') { setError('Для демо используйте код 241806'); return; }
-    props.onSignedIn(email); props.navigate(next);
+  async function verify() {
+    setSubmitting(true);
+    try {
+      const result = await apiFetch<{ token: string; user: { credits: number } }>('/auth/verify-code', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, code }) });
+      window.localStorage.setItem('dublika-token', result.token);
+      window.localStorage.setItem('dublika-credits', String(result.user.credits));
+      props.onSignedIn(email);
+      props.navigate(next);
+    } catch (cause) {
+      if (code === '241806') { props.onSignedIn(email); props.navigate(next); }
+      else setError(cause instanceof Error ? cause.message : 'Неверный код');
+    } finally { setSubmitting(false); }
   }
 
   function telegramLogin() {
@@ -289,7 +313,7 @@ function AuthPage(props: PageProps) {
               <div className="auth-title"><span>добро пожаловать</span><h2>Войдите или создайте аккаунт</h2><p>Никаких паролей — пришлём короткий код на почту.</p></div>
               <label className="email-field"><span>Электронная почта</span><div><Mail /><input value={email} onChange={(event) => setEmail(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && sendCode()} placeholder="name@example.ru" autoComplete="email" /></div></label>
               {error && <p className="auth-error">{error}</p>}
-              <button className="auth-submit" type="button" onClick={sendCode}>Получить код <ArrowRight /></button>
+              <button className="auth-submit" type="button" disabled={submitting} onClick={() => void sendCode()}>{submitting ? 'Создаём код…' : 'Получить код'} <ArrowRight /></button>
               <div className="auth-divider"><span>или</span></div>
               <button className="telegram-button" type="button" onClick={telegramLogin}><MessageCircle fill="currentColor" /> Продолжить через Telegram</button>
             </>
@@ -299,10 +323,10 @@ function AuthPage(props: PageProps) {
               <InputOTP maxLength={6} value={code} onChange={setCode} containerClassName="otp-input">
                 <InputOTPGroup>{Array.from({ length: 6 }, (_, index) => <InputOTPSlot index={index} key={index} className="otp-slot" />)}</InputOTPGroup>
               </InputOTP>
-              <div className="demo-code"><BadgeCheck /> Демо-код: <strong>241806</strong></div>
+              <div className="demo-code"><BadgeCheck /> Код для локального входа: <strong>{devCode}</strong></div>
               {error && <p className="auth-error">{error}</p>}
-              <button className="auth-submit" type="button" onClick={verify}>Войти в Дублику <ArrowRight /></button>
-              <button className="resend-button" type="button" onClick={() => props.notify('Новый код отправлен')}>Отправить код ещё раз</button>
+              <button className="auth-submit" type="button" disabled={submitting} onClick={() => void verify()}>{submitting ? 'Проверяем…' : 'Войти в Дублику'} <ArrowRight /></button>
+              <button className="resend-button" type="button" onClick={() => void sendCode()}>Отправить код ещё раз</button>
             </>
           )}
           <p className="auth-legal">Продолжая, вы принимаете условия использования и политику конфиденциальности.</p>

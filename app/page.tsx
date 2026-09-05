@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
   BadgeCheck,
+  Captions,
   Check,
   ChevronDown,
   CircleHelp,
@@ -48,6 +49,7 @@ import { Slider } from '@/components/ui/slider';
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { apiFetch, mediaUrl } from '@/lib/local-api';
 
 type SourceKind = 'file' | 'link' | 'demo';
 type SegmentState = 'ready' | 'pending' | 'original';
@@ -114,6 +116,12 @@ export default function Home() {
   const [countdownEnabled, setCountdownEnabled] = useState(true);
   const [originalMonitor, setOriginalMonitor] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [backendOnline, setBackendOnline] = useState(false);
+  const [resultUrl, setResultUrl] = useState('');
+  const [credits, setCredits] = useState(() => Number(typeof window !== 'undefined' ? window.localStorage.getItem('dublika-credits') || 3 : 3));
+  const [burnSubtitles, setBurnSubtitles] = useState(true);
 
   const clipLength = Math.max(1, trim[1] - trim[0]);
   const finishedSegments = segments.filter((item) => item.state !== 'pending').length;
@@ -145,19 +153,8 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (assembly !== 'processing') return;
-    const timer = window.setInterval(() => {
-      setAssemblyProgress((value) => {
-        if (value >= 100) {
-          window.clearInterval(timer);
-          setAssembly('done');
-          return 100;
-        }
-        return Math.min(100, value + 7);
-      });
-    }, 150);
-    return () => window.clearInterval(timer);
-  }, [assembly]);
+    apiFetch<{ ok: boolean }>('/health').then(() => setBackendOnline(true)).catch(() => setBackendOnline(false));
+  }, []);
 
   const navigate: Navigate = (path) => {
     window.history.pushState({}, '', path);
@@ -174,16 +171,48 @@ export default function Home() {
     setMessage('Профиль создан. Вам доступны 3 бесплатных видео.');
   }
 
-  function loadDemo() {
+  async function createRemoteProject(url: string, title: string) {
+    setUploading(true);
+    try {
+      const result = await apiFetch<{ project: { id: string; inputUrl: string }; credits: number }>('/projects/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, title }) });
+      setProjectId(result.project.id);
+      setVideoUrl(mediaUrl(result.project.inputUrl));
+      setCredits(result.credits);
+      window.localStorage.setItem('dublika-credits', String(result.credits));
+      setBackendOnline(true);
+      return result.project.id;
+    } catch (cause) {
+      setBackendOnline(false);
+      setMessage(cause instanceof Error ? cause.message : 'Не удалось импортировать видео');
+      return null;
+    } finally { setUploading(false); }
+  }
+
+  async function loadDemo() {
     setSourceTab('demo');
     setSourceReady(true);
     setSourceName('Цветы крупным планом.mp4');
     setVideoUrl(demoVideo);
     setDuration(5.05);
     setTrim([0, 5.05]);
-    setAnalyzed(true);
+    setAnalyzed(false);
+    setMessage('Демо открыто. Подключаем его к локальному рендеру…');
+    const id = await createRemoteProject(demoVideo, 'Цветы крупным планом.mp4');
+    if (id) {
+      try {
+        const result = await apiFetch<{ segments: Segment[] }>(`/projects/${id}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start: 0, end: 5.05 }) });
+        setSegments(result.segments);
+        setAnalyzed(true);
+        setActiveSegment(1);
+        setMessage('Демо-проект готов к реальной записи и сборке.');
+        return;
+      } catch (cause) {
+        setMessage(cause instanceof Error ? cause.message : 'Не удалось подготовить демо');
+      }
+    }
     setSegments(initialSegments);
-    setMessage('Демо-проект готов: 4 реплики уже размечены.');
+    setAnalyzed(true);
+    setMessage('Демо открыто в режиме интерфейса. Запустите локальный сервер для MP4-рендера.');
   }
 
   useEffect(() => {
@@ -200,12 +229,28 @@ export default function Home() {
         if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length > 0) {
           throw new Error('load_demo_project does not accept parameters');
         }
-        loadDemo();
+        await loadDemo();
         return { status: 'ready', project: 'Цветы крупным планом' };
       },
     }, { signal: lifecycle.signal })).catch(() => undefined);
     return () => lifecycle.abort();
   }, []);
+
+  async function uploadSource(file: File) {
+    setUploading(true);
+    try {
+      const result = await apiFetch<{ project: { id: string; inputUrl: string }; credits: number }>('/projects/upload', { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) }, body: file });
+      setProjectId(result.project.id);
+      setVideoUrl(mediaUrl(result.project.inputUrl));
+      setCredits(result.credits);
+      window.localStorage.setItem('dublika-credits', String(result.credits));
+      setBackendOnline(true);
+      setMessage('Видео сохранено на этом компьютере. Выберите нужный отрывок.');
+    } catch (cause) {
+      setBackendOnline(false);
+      setMessage(cause instanceof Error ? cause.message : 'Не удалось загрузить видео');
+    } finally { setUploading(false); }
+  }
 
   function onFile(file?: File) {
     if (!file) return;
@@ -219,10 +264,12 @@ export default function Home() {
     setSourceReady(true);
     setAnalyzed(false);
     setAssembly('idle');
-    setMessage('Видео загружено. Выберите отрывок до 4 минут.');
+    setResultUrl('');
+    setMessage('Загружаем видео в локальный медиасервер…');
+    void uploadSource(file);
   }
 
-  function importLink() {
+  async function importLink() {
     const value = sourceUrl.trim();
     if (!/^https?:\/\//i.test(value)) {
       setMessage('Вставьте полную ссылку, которая начинается с http:// или https://');
@@ -233,7 +280,9 @@ export default function Home() {
     setSourceName(value.includes('youtu') ? 'Видео с YouTube' : value.includes('vk') ? 'Видео из VK' : 'Видео по ссылке');
     setSourceReady(true);
     setAnalyzed(false);
-    setMessage(isDirect ? 'Прямая ссылка подключена.' : 'Ссылка принята. В продуктовой версии импорт выполняет защищённый сервер.');
+    setMessage(isDirect ? 'Скачиваем прямую ссылку на локальный сервер…' : 'YouTube и VK могут потребовать прямой адрес видео. Пробуем импорт…');
+    const id = await createRemoteProject(value, value.includes('youtu') ? 'Видео с YouTube' : value.includes('vk') ? 'Видео из VK' : 'Видео по ссылке');
+    if (id) setMessage('Видео импортировано и сохранено локально.');
   }
 
   function handleMetadata() {
@@ -251,17 +300,30 @@ export default function Home() {
     setTrim([Math.max(0, start), Math.min(duration, end)]);
   }
 
-  function analyzeClip() {
+  async function analyzeClip() {
     if (!sourceReady) { setMessage('Сначала загрузите видео или откройте демо.'); return; }
     setAnalyzing(true);
     setMessage('Отделяем речь, распознаём текст и ищем паузы…');
+    if (projectId) {
+      try {
+        const result = await apiFetch<{ segments: Segment[] }>(`/projects/${projectId}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start: trim[0], end: trim[1] }) });
+        setSegments(result.segments);
+        setActiveSegment(result.segments[0]?.id || 1);
+        setAnalyzing(false);
+        setAnalyzed(true);
+        setMessage(result.segments.some((item) => item.text.startsWith('Реплика ')) ? 'Паузы найдены. Впишите рекламный текст в каждую реплику перед записью.' : 'Речь распознана и разбита на реплики. Проверьте текст перед записью.');
+        return;
+      } catch (cause) {
+        setMessage(cause instanceof Error ? cause.message : 'Серверный анализ не удался');
+      }
+    }
     window.setTimeout(() => {
       const offset = trim[0];
       setSegments(initialSegments.map((item) => ({ ...item, start: item.start + offset, end: item.end + offset, state: item.id === 1 ? 'ready' : 'pending' })));
       setAnalyzing(false);
       setAnalyzed(true);
       setMessage('Готово: найдено 4 реплики. Текст можно поправить перед записью.');
-    }, 1300);
+    }, 700);
   }
 
   function drawWaveform(analyser?: AnalyserNode) {
@@ -372,7 +434,13 @@ export default function Home() {
         const audioUrl = URL.createObjectURL(blob);
         const segmentId = recordingSegment.current;
         setSegments((items) => items.map((item) => item.id === segmentId ? { ...item, state: 'ready', audioUrl } : item));
-        setMessage('Дубль сохранён и выровнен по громкости на уровне интерфейса записи.');
+        if (projectId && segmentId !== null) {
+          void apiFetch<{ ok: boolean }>(`/projects/${projectId}/segments/${segmentId}`, { method: 'POST', headers: { 'Content-Type': recorder.mimeType || 'audio/webm' }, body: blob })
+            .then(() => { setBackendOnline(true); setMessage('Дубль сохранён локально. При сборке очистим шум и выровняем громкость.'); })
+            .catch((cause) => setMessage(cause instanceof Error ? cause.message : 'Не удалось сохранить дубль на сервере'));
+        } else {
+          setMessage('Дубль сохранён в браузере. Для MP4-рендера загрузите видео через локальную версию.');
+        }
         window.setTimeout(() => drawWaveform(), 0);
       };
       recorderRef.current = recorder;
@@ -423,20 +491,50 @@ export default function Home() {
     setSegments((items) => items.map((item) => item.id === id ? { ...item, text } : item));
   }
 
-  function assembleVideo() {
+  async function assembleVideo() {
     if (!analyzed) { setMessage('Сначала подготовьте реплики из выбранного отрывка.'); return; }
+    if (!projectId) { setMessage('Для настоящего MP4-рендера откройте локальное приложение и загрузите видео заново.'); return; }
     setAssembly('processing');
-    setAssemblyProgress(7);
+    setAssemblyProgress(1);
     setMessage('Собираем дорожки, нормализуем голос и возвращаем музыку…');
+    try {
+      await apiFetch<{ ok: boolean }>(`/projects/${projectId}/render`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ segments: segments.map(({ id, text }) => ({ id, text })), burnSubtitles }) });
+      for (let attempt = 0; attempt < 900; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        const status = await apiFetch<{ status: string; progress: number; error: string | null; outputUrl: string | null; credits: number }>(`/projects/${projectId}/status`);
+        setAssemblyProgress(status.progress);
+        if (status.status === 'done' && status.outputUrl) {
+          setAssembly('done');
+          setResultUrl(mediaUrl(status.outputUrl));
+          setCredits(status.credits);
+          window.localStorage.setItem('dublika-credits', String(status.credits));
+          setMessage('Готово: голос очищен, оригинал приглушён под репликами, MP4 собран.');
+          return;
+        }
+        if (status.status === 'failed') throw new Error(status.error || 'Не удалось собрать видео');
+      }
+      throw new Error('Рендер занял слишком много времени');
+    } catch (cause) {
+      setAssembly('idle');
+      setMessage(cause instanceof Error ? cause.message : 'Ошибка сборки видео');
+    }
   }
 
   function downloadResult() {
+    if (resultUrl) {
+      const link = document.createElement('a');
+      link.href = resultUrl;
+      link.download = `dublika-${sourceName.replace(/\.[^.]+$/, '')}.mp4`;
+      link.click();
+      setMessage('Готовый MP4 скачивается с этого компьютера.');
+      return;
+    }
     if (videoUrl && videoUrl.startsWith('blob:')) {
       const link = document.createElement('a');
       link.href = videoUrl;
       link.download = `dublika-${sourceName}`;
       link.click();
-      setMessage('Черновик исходного ролика скачан. Серверный рендер подключается отдельно.');
+      setMessage('Пока скачан исходник: сначала запишите реплики и нажмите «Собрать видео».');
       return;
     }
     const project = { title: sourceName, clip: { start: trim[0], end: trim[1] }, segments: segments.map(({ audioUrl: _audioUrl, ...item }) => item), status: 'demo-render' };
@@ -446,7 +544,7 @@ export default function Home() {
     link.download = 'dublika-project.json';
     link.click();
     URL.revokeObjectURL(link.href);
-    setMessage('Демо-проект скачан. Для MP4 нужен подключённый сервер обработки.');
+    setMessage('Проект сохранён. Для MP4 запустите локальную обработку.');
   }
 
   function choosePlan(name: string) {
@@ -490,7 +588,7 @@ export default function Home() {
         </nav>
         <div className="header-actions">
           <button className="icon-button" type="button" onClick={() => setDarkMode((value) => !value)} aria-label={darkMode ? 'Светлая тема' : 'Тёмная тема'}>{darkMode ? <Sun size={18} /> : <Moon size={18} />}</button>
-          <button className="credit-pill" type="button" onClick={() => setPricingOpen(true)}><Sparkles size={15} />{plan === 'Пробный' ? '3 видео' : plan}</button>
+          <button className="credit-pill" type="button" onClick={() => setPricingOpen(true)}><Sparkles size={15} />{plan === 'Пробный' ? `${credits} видео` : plan}</button>
           <button className="icon-button help-button" type="button" aria-label="Помощь"><CircleHelp size={19} /></button>
           <button className="account-button" type="button" onClick={() => navigate('/dashboard')}><UserRound size={17} /><span>Алексей</span></button>
         </div>
@@ -499,7 +597,7 @@ export default function Home() {
       <main id="top" className="main-area">
         <section className="page-heading">
           <div><p className="eyebrow"><span /> новый проект</p><h1>Озвучьте видео<br /><em>своим голосом</em></h1></div>
-          <div className="privacy-note"><ShieldCheck size={22} /><p><strong>Ваш контент защищён</strong><span>Шифрование и автоудаление через 24 часа</span></p></div>
+          <div className={`privacy-note local-server-note ${backendOnline ? 'is-online' : ''}`}><ShieldCheck size={22} /><p><strong>{backendOnline ? 'Локальный сервер работает' : 'Режим просмотра'}</strong><span>{backendOnline ? 'Файлы остаются на этом компьютере' : 'Запустите npm run local для обработки'}</span></p></div>
         </section>
 
         <section className="stepper" aria-label="Прогресс проекта">
@@ -515,7 +613,7 @@ export default function Home() {
             <section className="surface source-card">
               <div className="section-header">
                 <div><span className="section-index">01</span><div><h2>Добавьте видео</h2><p>Файл, ссылка или готовый пример</p></div></div>
-                {sourceReady && <span className="success-chip"><Check size={14} /> Загружено</span>}
+                {sourceReady && <span className="success-chip">{uploading ? <span className="loader" /> : <Check size={14} />} {uploading ? 'Сохраняем…' : 'Загружено'}</span>}
               </div>
               <Tabs value={sourceTab} onValueChange={(value) => setSourceTab(value as SourceKind)}>
                 <TabsList className="source-tabs">
@@ -529,7 +627,7 @@ export default function Home() {
                 </TabsContent>
                 <TabsContent value="link">
                   <div className="link-panel"><div className="link-input-wrap"><Link2 size={19} /><input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="Ссылка на YouTube, VK Видео или прямой MP4" /></div><button className="primary-button small" type="button" onClick={importLink}>Загрузить <ArrowRight size={17} /></button></div>
-                  <p className="legal-hint">Импортируйте только видео, на использование которых у вас есть права.</p>
+                  <p className="legal-hint">Прямые ссылки работают сразу. YouTube и VK требуют доступный медиапоток; используйте только контент, на который у вас есть права.</p>
                 </TabsContent>
                 <TabsContent value="demo">
                   <div className="demo-panel"><div className="demo-cover"><Play size={24} fill="currentColor" /></div><div><strong>Цветы крупным планом</strong><span>00:05 · 4 реплики · русский</span></div><button className="secondary-button" type="button" onClick={loadDemo}>Открыть демо</button></div>
@@ -559,8 +657,8 @@ export default function Home() {
                 <div className="timeline-scale"><span>0:00</span><span>{formatTime(duration / 2)}</span><span>{formatTime(duration)}</span></div>
               </div>
               <div className="editor-footer">
-                <div className="quality-note"><WandSparkles size={18} /><p><strong>Умная обработка</strong><span>Отделим голоса от музыки и сохраним фон</span></p></div>
-                <button className="primary-button" type="button" onClick={analyzeClip} disabled={!sourceReady || analyzing}>{analyzing ? <><span className="loader" /> Анализируем…</> : <>Подготовить реплики <ArrowRight size={18} /></>}</button>
+                <div className="quality-note"><WandSparkles size={18} /><p><strong>Умная обработка</strong><span>Приглушим оригинал под дублем и сохраним фон</span></p></div>
+                <button className="primary-button" type="button" onClick={() => void analyzeClip()} disabled={!sourceReady || analyzing || uploading}>{analyzing ? <><span className="loader" /> Анализируем…</> : uploading ? 'Сохраняем видео…' : <>Подготовить реплики <ArrowRight size={18} /></>}</button>
               </div>
             </section>
 
@@ -615,6 +713,7 @@ export default function Home() {
               <div className="summary-list">
                 <div><span><Volume2 size={17} /> Голос</span><strong>Нормализация <Check size={14} /></strong></div>
                 <div><span><Music2 size={17} /> Фоновая музыка</span><strong>Сохранить <Check size={14} /></strong></div>
+                <div><span><Captions size={17} /> Субтитры</span><Switch aria-label="Добавить субтитры в готовое видео" checked={burnSubtitles} onCheckedChange={setBurnSubtitles} /></div>
                 <div><span><BadgeCheck size={17} /> Качество</span><strong>Full HD <ChevronDown size={14} /></strong></div>
               </div>
               {assembly === 'processing' && <div className="render-state"><div><span>Собираем видео</span><strong>{assemblyProgress}%</strong></div><Progress value={assemblyProgress} /><small>Сводим голос, музыку и субтитры</small></div>}
@@ -622,7 +721,7 @@ export default function Home() {
               <p className="price-line"><span>{plan === 'Пробный' ? 'Три обработки бесплатно' : `Тариф «${plan}» активен`}</span><ShieldCheck size={14} /> Без водяного знака</p>
             </section>
             <section className="aside-tip"><span className="tip-icon"><LockKeyhole size={20} /></span><div><strong>Приватный проект</strong><p>Ссылку на результат увидите только вы.</p></div></section>
-            <section id="projects" className="quota-card"><div><span>Лимит тарифа</span><strong>{plan === 'Пробный' ? '0 из 3' : '0 из 5'}</strong></div><Progress value={plan === 'Пробный' ? 100 : 2} /><button type="button" onClick={() => setPricingOpen(true)}>Получить ещё обработки <ArrowRight size={15} /></button></section>
+            <section id="projects" className="quota-card"><div><span>Осталось обработок</span><strong>{plan === 'Пробный' ? `${credits} из 3` : '5 из 5'}</strong></div><Progress value={plan === 'Пробный' ? credits / 3 * 100 : 100} /><button type="button" onClick={() => setPricingOpen(true)}>Получить ещё обработки <ArrowRight size={15} /></button></section>
           </aside>
         </div>
 

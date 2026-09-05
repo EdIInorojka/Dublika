@@ -37,5 +37,7 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+/.local-data/
+/.local-bin/
 
 .vercel
