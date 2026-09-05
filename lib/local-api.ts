@@ -1,5 +1,11 @@
 'use client';
 
+function apiOrigin() {
+  const { hostname, origin } = window.location;
+  if (hostname === 'localhost' || hostname === '127.0.0.1') return origin;
+  return window.localStorage.getItem('dublika-local-server') || 'http://127.0.0.1:8788';
+}
+
 function deviceId() {
   let value = window.localStorage.getItem('dublika-device-id');
   if (!value) {
@@ -14,7 +20,7 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   const headers = new Headers(init.headers);
   headers.set('X-Device-Id', deviceId());
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const response = await fetch(`/api${path}`, { ...init, headers });
+  const response = await fetch(`${apiOrigin()}/api${path}`, { ...init, headers });
   const contentType = response.headers.get('content-type') || '';
   if (!contentType.includes('application/json')) throw new Error('Локальный сервер обработки не запущен');
   const payload = await response.json() as T & { error?: string };
@@ -23,5 +29,5 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
 }
 
 export function mediaUrl(path: string) {
-  return new URL(path, window.location.origin).toString();
+  return new URL(path, apiOrigin()).toString();
 }

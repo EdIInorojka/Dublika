@@ -21,6 +21,12 @@ const maxVideoBytes = 1024 * 1024 * 1024;
 const maxAudioBytes = 40 * 1024 * 1024;
 const videoExtensions = new Set(['.mp4', '.mov', '.webm', '.mkv', '.m4v']);
 const audioExtensions = new Set(['.webm', '.ogg', '.wav', '.m4a', '.mp3', '.mp4']);
+const allowedOrigins = new Set([
+  `http://localhost:${port}`,
+  `http://127.0.0.1:${port}`,
+  'https://dublika-studio.gusta-voglenn19586.chatgpt.site',
+  ...String(process.env.DUBLIKA_ALLOWED_ORIGINS || '').split(',').map((origin) => origin.trim()).filter(Boolean),
+]);
 
 for (const directory of [dataDir, uploadDir, recordingDir, outputDir]) mkdirSync(directory, { recursive: true });
 
@@ -46,12 +52,20 @@ function sendJson(response, status, payload) {
   response.end(JSON.stringify(payload));
 }
 
-function setSecurityHeaders(response) {
+function setSecurityHeaders(request, response) {
   response.setHeader('X-Content-Type-Options', 'nosniff');
   response.setHeader('X-Frame-Options', 'DENY');
   response.setHeader('Referrer-Policy', 'no-referrer');
   response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   response.setHeader('Permissions-Policy', 'camera=(), geolocation=(), microphone=(self), payment=()');
+  const origin = String(request.headers.origin || '');
+  if (allowedOrigins.has(origin)) {
+    response.setHeader('Access-Control-Allow-Origin', origin);
+    response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Device-Id, X-File-Name');
+    response.setHeader('Access-Control-Allow-Private-Network', 'true');
+    response.setHeader('Vary', 'Origin');
+  }
 }
 
 async function readJson(request, limit = 256 * 1024) {
@@ -484,8 +498,14 @@ function sendFile(request, response, path) {
 }
 
 const server = createServer(async (request, response) => {
-  setSecurityHeaders(response);
+  setSecurityHeaders(request, response);
   try {
+    const origin = String(request.headers.origin || '');
+    if (origin && !allowedOrigins.has(origin)) return sendJson(response, 403, { error: 'Этот сайт не имеет доступа к локальному серверу' });
+    if (request.method === 'OPTIONS') {
+      response.writeHead(204, { 'Cache-Control': 'no-store' });
+      return response.end();
+    }
     const url = new URL(request.url || '/', `http://${request.headers.host || '127.0.0.1'}`);
     if (url.pathname.startsWith('/api/')) return await handleApi(request, response, url);
     if (url.pathname.startsWith('/media/outputs/')) {
