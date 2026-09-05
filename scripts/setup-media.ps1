@@ -6,9 +6,9 @@ $downloadUrl = 'https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt
 
 New-Item -ItemType Directory -Force -Path $binaryDirectory | Out-Null
 if (-not (Test-Path -LiteralPath $binaryPath)) {
-  Write-Host 'Скачиваю официальный модуль импорта YouTube/VK...'
+  Write-Host 'Downloading the official YouTube/VK import module...'
   Invoke-WebRequest -Uri $downloadUrl -OutFile $binaryPath
 }
 
 & $binaryPath --version
-Write-Host 'Медиамодули готовы.'
+Write-Host 'Media modules are ready.'
