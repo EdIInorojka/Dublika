@@ -112,7 +112,7 @@ export default function Home() {
   const [assemblyProgress, setAssemblyProgress] = useState(0);
   const [pricingOpen, setPricingOpen] = useState(false);
   const [signedIn, setSignedIn] = useState(() => typeof window !== 'undefined' && window.localStorage.getItem('dublika-auth') === '1');
-  const [plan, setPlan] = useState('Пробный');
+  const [plan] = useState('Пробный');
   const [countdownEnabled, setCountdownEnabled] = useState(true);
   const [originalMonitor, setOriginalMonitor] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
@@ -548,9 +548,8 @@ export default function Home() {
   }
 
   function choosePlan(name: string) {
-    setPlan(name);
     setPricingOpen(false);
-    setMessage(`Тариф «${name}» выбран. Подключение оплаты выполняется после добавления ключей.`);
+    setMessage(`Тариф «${name}» подготовлен. Для списания и начисления видео подключите ключи ЮKassa или CloudPayments.`);
   }
 
   const path = route.split('?')[0].split('#')[0] || '/';
