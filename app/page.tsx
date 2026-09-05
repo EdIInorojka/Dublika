@@ -53,6 +53,30 @@ import { apiFetch, mediaUrl } from '@/lib/local-api';
 
 type SourceKind = 'file' | 'link' | 'demo';
 type SegmentState = 'ready' | 'pending' | 'original';
+type PlaybackState = { kind: 'original' | 'take'; segmentId: number } | null;
+
+type SpeechRecognitionResultLike = {
+  isFinal: boolean;
+  0: { transcript: string };
+};
+
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: ArrayLike<SpeechRecognitionResultLike>;
+};
+
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 
 type Segment = {
   id: number;
@@ -87,9 +111,16 @@ export default function Home() {
   const liveWaveRef = useRef<HTMLCanvasElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordingChunks = useRef<Blob[]>([]);
-  const recordingSegment = useRef<number | null>(null);
+  const recordingSessionRef = useRef<{ segmentId: number; stopReason: 'manual' | 'limit' } | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const takeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const playbackStopTimeoutRef = useRef<number | null>(null);
+  const recordLimitTimeoutRef = useRef<number | null>(null);
+  const recordTickRef = useRef<number | null>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const transcriptRef = useRef('');
+  const recordStartedAtRef = useRef(0);
   const latestLevelsRef = useRef<number[]>(Array.from({ length: 96 }, () => 0));
 
   const [route, setRoute] = useState(() => typeof window === 'undefined' ? '/' : `${window.location.pathname}${window.location.search}${window.location.hash}`);
@@ -116,6 +147,10 @@ export default function Home() {
   const [countdownEnabled, setCountdownEnabled] = useState(true);
   const [originalMonitor, setOriginalMonitor] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
+  const [recordElapsed, setRecordElapsed] = useState(0);
+  const [liveTranscript, setLiveTranscript] = useState('');
+  const [transcriptionState, setTranscriptionState] = useState<'idle' | 'listening' | 'unsupported' | 'error'>('idle');
+  const [playback, setPlayback] = useState<PlaybackState>(null);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [backendOnline, setBackendOnline] = useState(false);
@@ -125,6 +160,8 @@ export default function Home() {
 
   const clipLength = Math.max(1, trim[1] - trim[0]);
   const finishedSegments = segments.filter((item) => item.state !== 'pending').length;
+  const pendingSegments = segments.filter((item) => item.state === 'pending').length;
+  const allSegmentsFinished = analyzed && segments.length > 0 && pendingSegments === 0;
   const currentStep = assembly === 'done' ? 5 : analyzed ? 3 : sourceReady ? 2 : 1;
 
   const timelineBlocks = useMemo(
@@ -149,6 +186,12 @@ export default function Home() {
 
   useEffect(() => () => {
     if (animationFrameRef.current) window.cancelAnimationFrame(animationFrameRef.current);
+    if (playbackStopTimeoutRef.current) window.clearTimeout(playbackStopTimeoutRef.current);
+    if (recordLimitTimeoutRef.current) window.clearTimeout(recordLimitTimeoutRef.current);
+    if (recordTickRef.current) window.clearInterval(recordTickRef.current);
+    takeAudioRef.current?.pause();
+    try { recognitionRef.current?.stop(); } catch { /* recognition may already be stopped */ }
+    recorderRef.current?.stream.getTracks().forEach((track) => track.stop());
     void audioContextRef.current?.close();
   }, []);
 
@@ -388,8 +431,77 @@ export default function Home() {
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSegment, analyzed, recording, segments]);
 
-  function stopRecording() {
+  function stopPlayback() {
+    if (playbackStopTimeoutRef.current) window.clearTimeout(playbackStopTimeoutRef.current);
+    playbackStopTimeoutRef.current = null;
+    segmentVideoRef.current?.pause();
+    if (takeAudioRef.current) {
+      takeAudioRef.current.onended = null;
+      takeAudioRef.current.pause();
+      takeAudioRef.current.currentTime = 0;
+      takeAudioRef.current = null;
+    }
+    setPlayback(null);
+  }
+
+  function startTranscription(id: number) {
+    transcriptRef.current = '';
+    setLiveTranscript('');
+    const browserWindow = window as typeof window & {
+      SpeechRecognition?: SpeechRecognitionConstructor;
+      webkitSpeechRecognition?: SpeechRecognitionConstructor;
+    };
+    const Recognition = browserWindow.SpeechRecognition || browserWindow.webkitSpeechRecognition;
+    if (!Recognition) {
+      setTranscriptionState('unsupported');
+      return;
+    }
+    const recognition = new Recognition();
+    recognition.lang = 'ru-RU';
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.onresult = (event) => {
+      let finalText = '';
+      let interimText = '';
+      for (let index = 0; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const text = String(result[0]?.transcript || '').trim();
+        if (!text) continue;
+        if (result.isFinal) finalText += `${text} `;
+        else if (index >= event.resultIndex) interimText += `${text} `;
+      }
+      const transcript = `${finalText}${interimText}`.trim();
+      transcriptRef.current = transcript;
+      setLiveTranscript(transcript);
+      if (transcript) setSegments((items) => items.map((item) => item.id === id ? { ...item, text: transcript } : item));
+    };
+    recognition.onerror = (event) => {
+      if (event.error !== 'no-speech' && event.error !== 'aborted') setTranscriptionState('error');
+    };
+    recognition.onend = () => {
+      recognitionRef.current = null;
+      setTranscriptionState((value) => value === 'listening' ? 'idle' : value);
+    };
+    recognitionRef.current = recognition;
+    try {
+      recognition.start();
+      setTranscriptionState('listening');
+    } catch {
+      recognitionRef.current = null;
+      setTranscriptionState('error');
+    }
+  }
+
+  function stopRecording(reason: 'manual' | 'limit' = 'manual') {
     if (!recorderRef.current || recorderRef.current.state === 'inactive') return;
+    if (recordingSessionRef.current) recordingSessionRef.current.stopReason = reason;
+    if (recordLimitTimeoutRef.current) window.clearTimeout(recordLimitTimeoutRef.current);
+    if (recordTickRef.current) window.clearInterval(recordTickRef.current);
+    if (playbackStopTimeoutRef.current) window.clearTimeout(playbackStopTimeoutRef.current);
+    recordLimitTimeoutRef.current = null;
+    recordTickRef.current = null;
+    playbackStopTimeoutRef.current = null;
+    try { recognitionRef.current?.stop(); } catch { /* recognition may already be stopped */ }
     recorderRef.current.stop();
     recorderRef.current.stream.getTracks().forEach((track) => track.stop());
     segmentVideoRef.current?.pause();
@@ -397,17 +509,28 @@ export default function Home() {
     animationFrameRef.current = null;
     void audioContextRef.current?.close();
     audioContextRef.current = null;
+    setPlayback(null);
     setRecording(null);
     setCountdown(null);
+    setRecordElapsed(0);
   }
 
   async function toggleRecord(id: number) {
     if (recording === id && recorderRef.current) {
-      stopRecording();
+      stopRecording('manual');
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia) { setMessage('Этот браузер не поддерживает запись. Попробуйте Chrome или Edge.'); return; }
     try {
+      if (recording !== null) {
+        stopRecording('manual');
+        setMessage('Предыдущая запись остановлена. Теперь можно начать новую реплику.');
+        return;
+      }
+      stopPlayback();
+      setActiveSegment(id);
+      setLiveTranscript('');
+      setTranscriptionState('idle');
       if (countdownEnabled) {
         for (const value of [3, 2, 1]) {
           setCountdown(value);
@@ -427,37 +550,60 @@ export default function Home() {
       audioContextRef.current = audioContext;
       latestLevelsRef.current = Array.from({ length: 96 }, () => 0);
       recordingChunks.current = [];
-      recordingSegment.current = id;
+      const recordingSession: { segmentId: number; stopReason: 'manual' | 'limit' } = { segmentId: id, stopReason: 'manual' };
+      recordingSessionRef.current = recordingSession;
       recorder.ondataavailable = (event) => { if (event.data.size) recordingChunks.current.push(event.data); };
       recorder.onstop = () => {
-        const blob = new Blob(recordingChunks.current, { type: recorder.mimeType });
+        const blob = new Blob(recordingChunks.current, { type: recorder.mimeType || 'audio/webm' });
+        if (!blob.size) {
+          if (recordingSessionRef.current === recordingSession) recordingSessionRef.current = null;
+          setMessage('Запись получилась пустой. Проверьте микрофон и повторите дубль.');
+          return;
+        }
         const audioUrl = URL.createObjectURL(blob);
-        const segmentId = recordingSegment.current;
-        setSegments((items) => items.map((item) => item.id === segmentId ? { ...item, state: 'ready', audioUrl } : item));
+        const segmentId = recordingSession.segmentId;
+        const recognizedText = transcriptRef.current.trim();
+        const willFinish = segments.every((item) => item.id === segmentId || item.state !== 'pending');
+        setSegments((items) => items.map((item) => item.id === segmentId ? { ...item, state: 'ready', audioUrl, text: recognizedText || item.text } : item));
+        const savedMessage = willFinish
+          ? 'Все реплики готовы. Можно собрать итоговый дубляж.'
+          : recordingSession.stopReason === 'limit'
+            ? 'Лимит реплики достигнут — запись остановлена и сохранена.'
+            : 'Дубль сохранён. Можно прослушать его или перейти дальше.';
         if (projectId && segmentId !== null) {
           void apiFetch<{ ok: boolean }>(`/projects/${projectId}/segments/${segmentId}`, { method: 'POST', headers: { 'Content-Type': recorder.mimeType || 'audio/webm' }, body: blob })
-            .then(() => { setBackendOnline(true); setMessage('Дубль сохранён локально. При сборке очистим шум и выровняем громкость.'); })
+            .then(() => { setBackendOnline(true); setMessage(savedMessage); })
             .catch((cause) => setMessage(cause instanceof Error ? cause.message : 'Не удалось сохранить дубль на сервере'));
         } else {
-          setMessage('Дубль сохранён в браузере. Для MP4-рендера загрузите видео через локальную версию.');
+          setMessage(willFinish ? savedMessage : 'Дубль сохранён в браузере. Для MP4-рендера загрузите видео через локальную версию.');
         }
+        if (recordingSessionRef.current === recordingSession) recordingSessionRef.current = null;
         window.setTimeout(() => drawWaveform(), 0);
       };
       recorderRef.current = recorder;
-      recorder.start();
+      const segment = segments.find((item) => item.id === id);
+      const maximumDuration = Math.max(0.35, (segment?.end || 1) - (segment?.start || 0));
+      recorder.start(100);
       setRecording(id);
-      setActiveSegment(id);
+      setRecordElapsed(0);
+      recordStartedAtRef.current = performance.now();
+      recordTickRef.current = window.setInterval(() => {
+        setRecordElapsed(Math.min(maximumDuration, (performance.now() - recordStartedAtRef.current) / 1000));
+      }, 50);
+      recordLimitTimeoutRef.current = window.setTimeout(() => stopRecording('limit'), maximumDuration * 1000);
+      startTranscription(id);
       drawWaveform(analyser);
       const preview = segmentVideoRef.current;
-      const segment = segments.find((item) => item.id === id);
       if (preview && segment) {
         preview.currentTime = Math.min(segment.start, Math.max(0, (preview.duration || segment.end) - 0.2));
         preview.muted = !originalMonitor;
         preview.volume = originalMonitor ? 0.34 : 0;
         void preview.play().catch(() => undefined);
       }
-      setMessage('Идёт запись. Зелёная дорожка показывает сигнал микрофона в реальном времени.');
+      setMessage(`Идёт запись. Она автоматически завершится через ${formatTime(maximumDuration)}.`);
     } catch {
+      if (recordLimitTimeoutRef.current) window.clearTimeout(recordLimitTimeoutRef.current);
+      if (recordTickRef.current) window.clearInterval(recordTickRef.current);
       setCountdown(null);
       setMessage('Не получилось включить микрофон. Разрешите доступ в браузере.');
     }
@@ -467,20 +613,81 @@ export default function Home() {
     const segment = segments.find((item) => item.id === activeSegment);
     const preview = segmentVideoRef.current;
     if (!segment || !preview) return;
+    if (playback?.kind === 'original' && playback.segmentId === segment.id && !preview.paused) {
+      stopPlayback();
+      return;
+    }
+    stopPlayback();
     preview.currentTime = Math.min(segment.start, Math.max(0, (preview.duration || segment.end) - 0.2));
     preview.muted = false;
     preview.volume = 0.72;
-    void preview.play();
-    window.setTimeout(() => preview.pause(), Math.max(500, (segment.end - segment.start) * 1000));
+    setPlayback({ kind: 'original', segmentId: segment.id });
+    void preview.play().catch(() => setPlayback(null));
+    playbackStopTimeoutRef.current = window.setTimeout(stopPlayback, Math.max(350, (segment.end - segment.start) * 1000));
+  }
+
+  function selectSegment(id: number) {
+    if (recording !== null) stopRecording('manual');
+    else stopPlayback();
+    setActiveSegment(id);
+    setLiveTranscript('');
+    setRecordElapsed(0);
+  }
+
+  function previousSegment() {
+    const currentIndex = segments.findIndex((item) => item.id === activeSegment);
+    const previous = segments[currentIndex <= 0 ? segments.length - 1 : currentIndex - 1];
+    if (previous) selectSegment(previous.id);
   }
 
   function nextSegment() {
-    setActiveSegment((value) => value >= segments.length ? 1 : value + 1);
+    const currentIndex = segments.findIndex((item) => item.id === activeSegment);
+    const next = segments[currentIndex >= segments.length - 1 ? 0 : currentIndex + 1];
+    if (next) selectSegment(next.id);
   }
 
   function playTake(item: Segment) {
     if (!item.audioUrl) { setMessage('Это демонстрационный дубль. Запишите свой, чтобы прослушать.'); return; }
-    void new Audio(item.audioUrl).play();
+    const isCurrentTake = playback?.kind === 'take' && playback.segmentId === item.id;
+    if (isCurrentTake) {
+      stopPlayback();
+      return;
+    }
+    if (recording !== null) stopRecording('manual');
+    stopPlayback();
+    setActiveSegment(item.id);
+    const audio = new Audio(item.audioUrl);
+    takeAudioRef.current = audio;
+    setPlayback({ kind: 'take', segmentId: item.id });
+    audio.onended = () => { takeAudioRef.current = null; setPlayback(null); };
+    void audio.play().catch(() => {
+      takeAudioRef.current = null;
+      setPlayback(null);
+      setMessage('Не удалось воспроизвести дубль. Попробуйте записать его ещё раз.');
+    });
+  }
+
+  function handleSegmentVideoPlay() {
+    if (takeAudioRef.current) {
+      takeAudioRef.current.onended = null;
+      takeAudioRef.current.pause();
+      takeAudioRef.current.currentTime = 0;
+      takeAudioRef.current = null;
+    }
+    if (recorderRef.current?.state === 'recording') setPlayback(null);
+    else setPlayback({ kind: 'original', segmentId: activeSegment });
+  }
+
+  function handleSegmentVideoPause() {
+    if (recorderRef.current?.state !== 'recording') setPlayback((value) => value?.kind === 'original' ? null : value);
+  }
+
+  function handleSegmentVideoTimeUpdate() {
+    const preview = segmentVideoRef.current;
+    const segment = segments.find((item) => item.id === activeSegment);
+    if (!preview || !segment || preview.currentTime < segment.end - 0.03) return;
+    if (recording === segment.id) stopRecording('limit');
+    else if (playback?.kind === 'original') stopPlayback();
   }
 
   function setOriginal(id: number) {
@@ -554,6 +761,11 @@ export default function Home() {
 
   const path = route.split('?')[0].split('#')[0] || '/';
   const activeLine = segments.find((item) => item.id === activeSegment) ?? segments[0];
+  const activeSegmentDuration = Math.max(0.35, activeLine.end - activeLine.start);
+  const recordRemaining = Math.max(0, activeSegmentDuration - recordElapsed);
+  const recordProgress = Math.min(100, recordElapsed / activeSegmentDuration * 100);
+  const originalIsPlaying = playback?.kind === 'original' && playback.segmentId === activeSegment;
+  const takeIsPlaying = playback?.kind === 'take' && playback.segmentId === activeSegment;
   const pageProps = {
     route,
     navigate,
@@ -664,35 +876,38 @@ export default function Home() {
             {analyzed && (
               <section className="surface dub-console-card">
                 <div className="section-header dub-console-header"><div><span className="section-index">03</span><div><h2>Запишите реплики</h2><p>Видео, оригинал и ваш дубль собраны в одном рабочем окне</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
-                <div className="dub-console-toolbar"><button type="button" onClick={() => setActiveSegment((value) => value <= 1 ? segments.length : value - 1)}>←</button><span>Реплика <strong>{activeSegment}</strong> / {segments.length}</span><button type="button" onClick={nextSegment}>→</button></div>
+                <div className="dub-console-toolbar"><button type="button" onClick={previousSegment} aria-label="Предыдущая реплика">←</button><span>Реплика <strong>{activeSegment}</strong> / {segments.length}</span><button type="button" onClick={nextSegment} aria-label="Следующая реплика">→</button></div>
                 <div className="dub-console">
                   <div className="dub-workbench">
                     <div className="segment-video-wrap">
-                      <video ref={segmentVideoRef} src={videoUrl || demoVideo} playsInline controls><track kind="captions" label="Русские субтитры" srcLang="ru" /></video>
+                      <video ref={segmentVideoRef} src={videoUrl || demoVideo} playsInline controls onPlay={handleSegmentVideoPlay} onPause={handleSegmentVideoPause} onTimeUpdate={handleSegmentVideoTimeUpdate}><track kind="captions" label="Русские субтитры" srcLang="ru" /></video>
                       <div className="segment-video-badge"><ListVideo /> {formatTime(activeLine.start)} — {formatTime(activeLine.end)}</div>
                       {countdown !== null && <div className="record-countdown"><span>{countdown}</span><small>приготовьтесь</small></div>}
+                      {recording === activeSegment && <div className={`live-transcript-overlay ${transcriptionState !== 'listening' ? 'is-muted' : ''}`}><Captions /><span>{liveTranscript || (transcriptionState === 'unsupported' ? 'Живая транскрипция недоступна в этом браузере' : transcriptionState === 'error' ? 'Не удалось распознать речь — текст можно ввести ниже' : 'Говорите — субтитры появятся здесь…')}</span></div>}
                     </div>
-                    <div className="active-caption"><span>Герой · реплика {activeSegment}</span><input value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} aria-label="Текст активной реплики" /></div>
+                    <div className="active-caption"><span>{recording === activeSegment ? 'Живая транскрипция' : `Герой · реплика ${activeSegment}`}</span><input value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} aria-label="Текст активной реплики" /></div>
                     <div className="wave-compare-head"><div><span className="legend-original"><i /> Оригинал</span><span className="legend-dub"><i /> Ваш дубль</span></div><span className={recording === activeSegment ? 'live-indicator is-live' : 'live-indicator'}><i /> {recording === activeSegment ? 'микрофон активен' : activeLine.audioUrl ? 'дубль записан' : 'готов к записи'}</span></div>
                     <div className="live-wave-shell"><canvas ref={liveWaveRef} className="live-wave-canvas" aria-label="Сравнение громкости оригинала и живого сигнала микрофона" /><div className="wave-centerline" /></div>
+                    <div className={`record-limit ${recording === activeSegment ? 'is-recording' : ''}`}><div><span>{recording === activeSegment ? 'Запись завершится автоматически' : 'Максимум для этой реплики'}</span><strong>{formatTime(recording === activeSegment ? recordRemaining : activeSegmentDuration)}</strong></div><div className="record-limit-track"><i style={{ width: `${recording === activeSegment ? recordProgress : 0}%` }} /></div></div>
                     <div className="record-controls">
-                      <button type="button" onClick={replayOriginal}><span><Volume2 /></span><strong>Оригинал</strong><small>прослушать</small></button>
-                      <button className={recording === activeSegment ? 'main-record-control is-recording' : 'main-record-control'} type="button" onClick={() => void toggleRecord(activeSegment)} disabled={countdown !== null}><span>{recording === activeSegment ? <i /> : <Mic />}</span><strong>{recording === activeSegment ? 'Стоп' : countdown !== null ? `${countdown}…` : 'Записать'}</strong><small>{recording === activeSegment ? 'завершить дубль' : 'новый дубль'}</small></button>
-                      <button type="button" onClick={() => playTake(activeLine)} disabled={!activeLine.audioUrl}><span><Headphones /></span><strong>Мой дубль</strong><small>прослушать</small></button>
+                      <button className={originalIsPlaying ? 'is-playing' : ''} type="button" onClick={replayOriginal} disabled={recording !== null || countdown !== null}><span>{originalIsPlaying ? <Pause /> : <Volume2 />}</span><strong>{originalIsPlaying ? 'Остановить' : 'Оригинал'}</strong><small>{originalIsPlaying ? 'идёт воспроизведение' : 'прослушать реплику'}</small></button>
+                      <button className={recording === activeSegment ? 'main-record-control is-recording' : 'main-record-control'} type="button" onClick={() => void toggleRecord(activeSegment)} disabled={countdown !== null}><span>{recording === activeSegment ? <i /> : <Mic />}</span><strong>{recording === activeSegment ? 'Стоп' : countdown !== null ? `${countdown}…` : 'Записать'}</strong><small>{recording === activeSegment ? `осталось ${formatTime(recordRemaining)}` : `до ${formatTime(activeSegmentDuration)}`}</small></button>
+                      <button className={takeIsPlaying ? 'is-playing' : ''} type="button" onClick={() => playTake(activeLine)} disabled={!activeLine.audioUrl || recording !== null}><span>{takeIsPlaying ? <Pause /> : <Headphones />}</span><strong>{takeIsPlaying ? 'Остановить' : 'Мой дубль'}</strong><small>{takeIsPlaying ? 'идёт воспроизведение' : 'прослушать запись'}</small></button>
                       <button type="button" onClick={nextSegment}><span><SkipForward /></span><strong>Дальше</strong><small>следующая реплика</small></button>
                     </div>
                     <div className="record-options">
                       <div className="record-option-row"><span className="option-icon"><TimerReset /></span><span><strong>Отсчёт 3 секунды</strong><small>Даёт время приготовиться</small></span><Switch aria-label="Включить трёхсекундный отсчёт" checked={countdownEnabled} onCheckedChange={setCountdownEnabled} /></div>
                       <div className="record-option-row"><span className="option-icon"><Headphones /></span><span><strong>Слушать оригинал</strong><small>Тихо в наушниках во время записи</small></span><Switch aria-label="Слушать оригинал во время записи" checked={originalMonitor} onCheckedChange={setOriginalMonitor} /></div>
                     </div>
+                    {allSegmentsFinished && assembly !== 'done' && <output className="final-dub-cta"><span className="final-dub-icon"><BadgeCheck /></span><div><strong>Все реплики готовы</strong><small>Проверьте дубли или сразу соберите итоговый ролик.</small></div><button type="button" onClick={assembleVideo} disabled={assembly === 'processing'}>{assembly === 'processing' ? <><span className="loader" /> {assemblyProgress}%</> : <><Sparkles /> Создать итоговый дубляж</>}</button></output>}
                   </div>
                   <div className="line-list segment-queue">
                     {segments.map((item) => (
                       <article className={`line-item ${activeSegment === item.id ? 'is-current' : ''}`} key={item.id}>
-                        <button className="line-play" type="button" onClick={() => setActiveSegment(item.id)} aria-label={`Выбрать реплику ${item.id}`}><Play size={15} fill="currentColor" /></button>
+                        <button className="line-play" type="button" onClick={() => selectSegment(item.id)} aria-label={`Выбрать реплику ${item.id}`}><Play size={15} fill="currentColor" /></button>
                         <div className="line-copy"><span className="timecode">{formatTime(item.start)} — {formatTime(item.end)}</span><input value={item.text} onChange={(event) => updateText(item.id, event.target.value)} aria-label={`Субтитр реплики ${item.id}`} /><div className="mini-wave">{waveform.slice(0, 18).map((height, index) => <i key={index} style={{ height: `${Math.max(14, height - item.id * 6)}%` }} />)}</div></div>
                         <div className="line-actions">
-                          {item.state === 'ready' && <button className="take-button" type="button" onClick={(event) => { event.stopPropagation(); playTake(item); }}><Headphones size={15} /> Дубль</button>}
+                          {item.state === 'ready' && <button className={`take-button ${playback?.kind === 'take' && playback.segmentId === item.id ? 'is-playing' : ''}`} type="button" onClick={(event) => { event.stopPropagation(); playTake(item); }}>{playback?.kind === 'take' && playback.segmentId === item.id ? <Pause size={15} /> : <Headphones size={15} />} {playback?.kind === 'take' && playback.segmentId === item.id ? 'Стоп' : 'Дубль'}</button>}
                           {item.state === 'original' && <span className="original-badge">Оригинал</span>}
                           <button className={`record-button ${recording === item.id ? 'is-recording' : ''}`} type="button" onClick={(event) => { event.stopPropagation(); void toggleRecord(item.id); }} aria-label={recording === item.id ? 'Остановить запись' : 'Записать реплику'}>{recording === item.id ? <span /> : <Mic size={17} />}</button>
                           <button className="reset-button" type="button" onClick={(event) => { event.stopPropagation(); setOriginal(item.id); }} aria-label="Оставить оригинальную реплику"><RotateCcw size={15} /></button>
@@ -716,7 +931,7 @@ export default function Home() {
                 <div><span><BadgeCheck size={17} /> Качество</span><strong>Full HD <ChevronDown size={14} /></strong></div>
               </div>
               {assembly === 'processing' && <div className="render-state"><div><span>Собираем видео</span><strong>{assemblyProgress}%</strong></div><Progress value={assemblyProgress} /><small>Сводим голос, музыку и субтитры</small></div>}
-              {assembly === 'done' ? <button className="download-button" type="button" onClick={downloadResult}><Download size={18} /> Скачать результат</button> : <button className="assemble-button" type="button" disabled={assembly === 'processing'} onClick={assembleVideo}><Sparkles size={18} /> {assembly === 'processing' ? 'Обрабатываем…' : 'Собрать видео'}</button>}
+              {assembly === 'done' ? <button className="download-button" type="button" onClick={downloadResult}><Download size={18} /> Скачать результат</button> : <button className="assemble-button" type="button" disabled={assembly === 'processing' || !allSegmentsFinished} onClick={assembleVideo}><Sparkles size={18} /> {assembly === 'processing' ? 'Обрабатываем…' : allSegmentsFinished ? 'Собрать видео' : `Осталось реплик: ${pendingSegments}`}</button>}
               <p className="price-line"><span>{plan === 'Пробный' ? 'Три обработки бесплатно' : `Тариф «${plan}» активен`}</span><ShieldCheck size={14} /> Без водяного знака</p>
             </section>
             <section className="aside-tip"><span className="tip-icon"><LockKeyhole size={20} /></span><div><strong>Приватный проект</strong><p>Ссылку на результат увидите только вы.</p></div></section>
