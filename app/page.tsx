@@ -12,6 +12,7 @@ import {
   Download,
   FileVideo,
   Headphones,
+  ListVideo,
   Link2,
   LockKeyhole,
   Mic,
@@ -23,6 +24,10 @@ import {
   Scissors,
   ShieldCheck,
   Sparkles,
+  SkipForward,
+  Sun,
+  Moon,
+  TimerReset,
   UploadCloud,
   UserRound,
   Volume2,
@@ -30,6 +35,7 @@ import {
   X,
 } from 'lucide-react';
 
+import { AppSidebar, ProductPages, type Navigate } from '@/components/product-pages';
 import {
   Dialog,
   DialogContent,
@@ -39,6 +45,8 @@ import {
 } from '@/components/ui/dialog';
 import { Progress } from '@/components/ui/progress';
 import { Slider } from '@/components/ui/slider';
+import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar';
+import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 type SourceKind = 'file' | 'link' | 'demo';
@@ -54,13 +62,14 @@ type Segment = {
 };
 
 const initialSegments: Segment[] = [
-  { id: 1, start: 2.4, end: 6.8, text: 'Кажется, мы всё-таки успели.', state: 'ready' },
-  { id: 2, start: 8.1, end: 12.6, text: 'Не спеши радоваться. Смотри вперёд.', state: 'pending' },
-  { id: 3, start: 14.2, end: 18.9, text: 'Ладно. Тогда держись крепче!', state: 'pending' },
-  { id: 4, start: 21.3, end: 26.4, text: 'Вот теперь можно радоваться.', state: 'pending' },
+  { id: 1, start: 0.3, end: 1.2, text: 'Кажется, мы всё-таки успели.', state: 'ready' },
+  { id: 2, start: 1.3, end: 2.2, text: 'Не спеши радоваться. Смотри вперёд.', state: 'pending' },
+  { id: 3, start: 2.4, end: 3.4, text: 'Ладно. Тогда держись крепче!', state: 'pending' },
+  { id: 4, start: 3.6, end: 4.8, text: 'Вот теперь можно радоваться.', state: 'pending' },
 ];
 
 const waveform = [18, 28, 34, 22, 48, 62, 38, 74, 54, 82, 44, 68, 30, 58, 72, 42, 88, 64, 46, 76, 34, 56, 84, 52, 70, 38, 60, 78, 48, 66, 26, 52, 72, 40, 58, 80, 46, 68, 36, 54, 74, 44, 62, 28, 50, 70, 38, 56];
+const demoVideo = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4';
 
 function formatTime(value: number) {
   const minutes = Math.floor(value / 60);
@@ -69,17 +78,20 @@ function formatTime(value: number) {
   return `${minutes}:${String(seconds).padStart(2, '0')}.${tenth}`;
 }
 
-function ProviderIcon({ name }: { name: string }) {
-  return <span className="provider-letter">{name.slice(0, 1)}</span>;
-}
-
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const segmentVideoRef = useRef<HTMLVideoElement>(null);
+  const liveWaveRef = useRef<HTMLCanvasElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordingChunks = useRef<Blob[]>([]);
   const recordingSegment = useRef<number | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const latestLevelsRef = useRef<number[]>(Array.from({ length: 96 }, () => 0));
 
+  const [route, setRoute] = useState(() => typeof window === 'undefined' ? '/' : `${window.location.pathname}${window.location.search}${window.location.hash}`);
+  const [darkMode, setDarkMode] = useState(() => typeof window !== 'undefined' && window.localStorage.getItem('dublika-theme') === 'dark');
   const [sourceTab, setSourceTab] = useState<SourceKind>('file');
   const [sourceReady, setSourceReady] = useState(false);
   const [sourceName, setSourceName] = useState('Новый ролик');
@@ -96,10 +108,12 @@ export default function Home() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [assembly, setAssembly] = useState<'idle' | 'processing' | 'done'>('idle');
   const [assemblyProgress, setAssemblyProgress] = useState(0);
-  const [authOpen, setAuthOpen] = useState(false);
   const [pricingOpen, setPricingOpen] = useState(false);
-  const [signedIn, setSignedIn] = useState(false);
+  const [signedIn, setSignedIn] = useState(() => typeof window !== 'undefined' && window.localStorage.getItem('dublika-auth') === '1');
   const [plan, setPlan] = useState('Пробный');
+  const [countdownEnabled, setCountdownEnabled] = useState(true);
+  const [originalMonitor, setOriginalMonitor] = useState(false);
+  const [countdown, setCountdown] = useState<number | null>(null);
 
   const clipLength = Math.max(1, trim[1] - trim[0]);
   const finishedSegments = segments.filter((item) => item.state !== 'pending').length;
@@ -113,6 +127,22 @@ export default function Home() {
   useEffect(() => {
     return () => { if (videoUrl.startsWith('blob:')) URL.revokeObjectURL(videoUrl); };
   }, [videoUrl]);
+
+  useEffect(() => {
+    const syncRoute = () => setRoute(`${window.location.pathname}${window.location.search}${window.location.hash}`);
+    window.addEventListener('popstate', syncRoute);
+    return () => window.removeEventListener('popstate', syncRoute);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', darkMode);
+    window.localStorage.setItem('dublika-theme', darkMode ? 'dark' : 'light');
+  }, [darkMode]);
+
+  useEffect(() => () => {
+    if (animationFrameRef.current) window.cancelAnimationFrame(animationFrameRef.current);
+    void audioContextRef.current?.close();
+  }, []);
 
   useEffect(() => {
     if (assembly !== 'processing') return;
@@ -129,6 +159,33 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [assembly]);
 
+  const navigate: Navigate = (path) => {
+    window.history.pushState({}, '', path);
+    setRoute(path);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    const hash = path.split('#')[1];
+    if (hash) window.setTimeout(() => document.getElementById(hash)?.scrollIntoView({ behavior: 'smooth' }), 60);
+  };
+
+  function handleSignedIn(email: string) {
+    window.localStorage.setItem('dublika-auth', '1');
+    window.localStorage.setItem('dublika-user', email);
+    setSignedIn(true);
+    setMessage('Профиль создан. Вам доступны 3 бесплатных видео.');
+  }
+
+  function loadDemo() {
+    setSourceTab('demo');
+    setSourceReady(true);
+    setSourceName('Цветы крупным планом.mp4');
+    setVideoUrl(demoVideo);
+    setDuration(5.05);
+    setTrim([0, 5.05]);
+    setAnalyzed(true);
+    setSegments(initialSegments);
+    setMessage('Демо-проект готов: 4 реплики уже размечены.');
+  }
+
   useEffect(() => {
     const context = (document as Document & { modelContext?: { registerTool: (tool: unknown, options?: { signal?: AbortSignal }) => void | Promise<void> } }).modelContext;
     if (!context?.registerTool) return;
@@ -144,22 +201,11 @@ export default function Home() {
           throw new Error('load_demo_project does not accept parameters');
         }
         loadDemo();
-        return { status: 'ready', project: 'Город после дождя' };
+        return { status: 'ready', project: 'Цветы крупным планом' };
       },
     }, { signal: lifecycle.signal })).catch(() => undefined);
     return () => lifecycle.abort();
   }, []);
-
-  function loadDemo() {
-    setSourceTab('demo');
-    setSourceReady(true);
-    setSourceName('Город после дождя.mp4');
-    setDuration(192);
-    setTrim([36, 69]);
-    setAnalyzed(true);
-    setSegments(initialSegments);
-    setMessage('Демо-проект готов: 4 реплики уже размечены.');
-  }
 
   function onFile(file?: File) {
     if (!file) return;
@@ -199,7 +245,8 @@ export default function Home() {
 
   function handleTrim(next: number | readonly number[]) {
     const values = Array.isArray(next) ? [...next] : [0, Number(next)];
-    let [start, end] = values;
+    const [start, initialEnd] = values;
+    let end = initialEnd;
     if (end - start > 240) end = start + 240;
     setTrim([Math.max(0, start), Math.min(duration, end)]);
   }
@@ -217,17 +264,106 @@ export default function Home() {
     }, 1300);
   }
 
+  function drawWaveform(analyser?: AnalyserNode) {
+    const canvas = liveWaveRef.current;
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context) return;
+    const bounds = canvas.getBoundingClientRect();
+    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    const width = Math.max(320, bounds.width);
+    const height = Math.max(120, bounds.height);
+    if (canvas.width !== Math.floor(width * ratio) || canvas.height !== Math.floor(height * ratio)) {
+      canvas.width = Math.floor(width * ratio);
+      canvas.height = Math.floor(height * ratio);
+    }
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, width, height);
+
+    const barCount = 96;
+    const gap = width / barCount;
+    context.strokeStyle = 'rgba(239, 86, 86, .36)';
+    context.lineWidth = 2;
+    for (let index = 0; index < barCount; index += 1) {
+      const originalHeight = (waveform[index % waveform.length] / 100) * height * 0.7;
+      context.beginPath();
+      context.moveTo(index * gap + gap / 2, height / 2 - originalHeight / 2);
+      context.lineTo(index * gap + gap / 2, height / 2 + originalHeight / 2);
+      context.stroke();
+    }
+
+    if (analyser) {
+      const samples = new Uint8Array(analyser.fftSize);
+      analyser.getByteTimeDomainData(samples);
+      let energy = 0;
+      for (const sample of samples) energy += Math.abs(sample - 128) / 128;
+      const level = Math.min(1, (energy / samples.length) * 4.8);
+      latestLevelsRef.current = [...latestLevelsRef.current.slice(1), level];
+    }
+
+    const current = segments.find((item) => item.id === activeSegment);
+    const levels = latestLevelsRef.current;
+    context.strokeStyle = current?.audioUrl || analyser ? '#75e66d' : 'rgba(117, 230, 109, .22)';
+    context.lineWidth = 3;
+    levels.forEach((level, index) => {
+      const voiceHeight = Math.max(2, level * height * 0.9);
+      context.beginPath();
+      context.moveTo(index * gap + gap / 2, height / 2 - voiceHeight / 2);
+      context.lineTo(index * gap + gap / 2, height / 2 + voiceHeight / 2);
+      context.stroke();
+    });
+
+    context.fillStyle = 'rgba(255,255,255,.78)';
+    context.font = '600 11px Inter, sans-serif';
+    const peak = Math.max(...levels);
+    context.fillText(analyser ? `LIVE  ${Math.round(peak * 100)}%` : current?.audioUrl ? 'ДУБЛЬ ЗАПИСАН' : 'МИКРОФОН ГОТОВ', 14, 20);
+    if (analyser) animationFrameRef.current = window.requestAnimationFrame(() => drawWaveform(analyser));
+  }
+
+  // The canvas is intentionally redrawn after a segment or take changes.
+  useEffect(() => {
+    if (analyzed && recording === null) drawWaveform();
+    // drawWaveform is intentionally recreated with the current segment snapshot.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSegment, analyzed, recording, segments]);
+
+  function stopRecording() {
+    if (!recorderRef.current || recorderRef.current.state === 'inactive') return;
+    recorderRef.current.stop();
+    recorderRef.current.stream.getTracks().forEach((track) => track.stop());
+    segmentVideoRef.current?.pause();
+    if (animationFrameRef.current) window.cancelAnimationFrame(animationFrameRef.current);
+    animationFrameRef.current = null;
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+    setRecording(null);
+    setCountdown(null);
+  }
+
   async function toggleRecord(id: number) {
     if (recording === id && recorderRef.current) {
-      recorderRef.current.stop();
-      recorderRef.current.stream.getTracks().forEach((track) => track.stop());
-      setRecording(null);
+      stopRecording();
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia) { setMessage('Этот браузер не поддерживает запись. Попробуйте Chrome или Edge.'); return; }
     try {
+      if (countdownEnabled) {
+        for (const value of [3, 2, 1]) {
+          setCountdown(value);
+          await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        }
+        setCountdown(null);
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
       const recorder = new MediaRecorder(stream);
+      const AudioContextConstructor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextConstructor) throw new Error('AudioContext is not supported');
+      const audioContext = new AudioContextConstructor();
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.76;
+      audioContext.createMediaStreamSource(stream).connect(analyser);
+      audioContextRef.current = audioContext;
+      latestLevelsRef.current = Array.from({ length: 96 }, () => 0);
       recordingChunks.current = [];
       recordingSegment.current = id;
       recorder.ondataavailable = (event) => { if (event.data.size) recordingChunks.current.push(event.data); };
@@ -236,14 +372,42 @@ export default function Home() {
         const audioUrl = URL.createObjectURL(blob);
         const segmentId = recordingSegment.current;
         setSegments((items) => items.map((item) => item.id === segmentId ? { ...item, state: 'ready', audioUrl } : item));
-        setMessage('Дубль сохранён и автоматически выровнен по громкости.');
+        setMessage('Дубль сохранён и выровнен по громкости на уровне интерфейса записи.');
+        window.setTimeout(() => drawWaveform(), 0);
       };
       recorderRef.current = recorder;
       recorder.start();
       setRecording(id);
       setActiveSegment(id);
-      setMessage('Идёт запись. Нажмите ещё раз, чтобы закончить дубль.');
-    } catch { setMessage('Не получилось включить микрофон. Разрешите доступ в браузере.'); }
+      drawWaveform(analyser);
+      const preview = segmentVideoRef.current;
+      const segment = segments.find((item) => item.id === id);
+      if (preview && segment) {
+        preview.currentTime = Math.min(segment.start, Math.max(0, (preview.duration || segment.end) - 0.2));
+        preview.muted = !originalMonitor;
+        preview.volume = originalMonitor ? 0.34 : 0;
+        void preview.play().catch(() => undefined);
+      }
+      setMessage('Идёт запись. Зелёная дорожка показывает сигнал микрофона в реальном времени.');
+    } catch {
+      setCountdown(null);
+      setMessage('Не получилось включить микрофон. Разрешите доступ в браузере.');
+    }
+  }
+
+  function replayOriginal() {
+    const segment = segments.find((item) => item.id === activeSegment);
+    const preview = segmentVideoRef.current;
+    if (!segment || !preview) return;
+    preview.currentTime = Math.min(segment.start, Math.max(0, (preview.duration || segment.end) - 0.2));
+    preview.muted = false;
+    preview.volume = 0.72;
+    void preview.play();
+    window.setTimeout(() => preview.pause(), Math.max(500, (segment.end - segment.start) * 1000));
+  }
+
+  function nextSegment() {
+    setActiveSegment((value) => value >= segments.length ? 1 : value + 1);
   }
 
   function playTake(item: Segment) {
@@ -285,31 +449,50 @@ export default function Home() {
     setMessage('Демо-проект скачан. Для MP4 нужен подключённый сервер обработки.');
   }
 
-  function demoLogin(provider: string) {
-    setSignedIn(true);
-    setAuthOpen(false);
-    setMessage(`Демо-вход через ${provider} выполнен.`);
-  }
-
   function choosePlan(name: string) {
     setPlan(name);
     setPricingOpen(false);
     setMessage(`Тариф «${name}» выбран. Подключение оплаты выполняется после добавления ключей.`);
   }
 
+  const path = route.split('?')[0].split('#')[0] || '/';
+  const activeLine = segments.find((item) => item.id === activeSegment) ?? segments[0];
+  const pageProps = {
+    route,
+    navigate,
+    darkMode,
+    toggleTheme: () => setDarkMode((value) => !value),
+    signedIn,
+    onSignedIn: handleSignedIn,
+    notify: setMessage,
+  };
+
+  if (path !== '/studio' || !signedIn) {
+    return (
+      <div className="site-root">
+        <ProductPages {...pageProps} route={path === '/studio' && !signedIn ? '/auth?next=/studio' : route} />
+        {message && <output className="toast-message"><Check size={17} /><span>{message}</span><button onClick={() => setMessage('')} aria-label="Закрыть сообщение"><X size={15} /></button></output>}
+      </div>
+    );
+  }
+
   return (
-    <div className="app-shell">
+    <SidebarProvider defaultOpen>
+      <AppSidebar route="/studio" navigate={navigate} />
+      <SidebarInset className="studio-inset">
+    <div className="app-shell studio-app-shell">
       <header className="topbar">
-        <a className="brand" href="#top" aria-label="Дублика — на главную">
+        <div className="studio-brand-group"><SidebarTrigger /><button className="brand" type="button" onClick={() => navigate('/')} aria-label="Дублика — на главную">
           <span className="brand-mark"><span>Д</span></span><span className="brand-word">дублика</span><span className="beta">beta</span>
-        </a>
+        </button></div>
         <nav className="main-nav" aria-label="Основная навигация">
-          <a className="nav-active" href="#studio">Студия</a><a href="#projects">Проекты</a><button type="button" onClick={() => setPricingOpen(true)}>Тарифы</button>
+          <a className="nav-active" href="#studio">Студия</a><button type="button" onClick={() => navigate('/videos')}>Мои видео</button><button type="button" onClick={() => setPricingOpen(true)}>Тарифы</button>
         </nav>
         <div className="header-actions">
-          <button className="credit-pill" type="button" onClick={() => setPricingOpen(true)}><Sparkles size={15} />{plan === 'Пробный' ? '1 проба' : plan}</button>
+          <button className="icon-button" type="button" onClick={() => setDarkMode((value) => !value)} aria-label={darkMode ? 'Светлая тема' : 'Тёмная тема'}>{darkMode ? <Sun size={18} /> : <Moon size={18} />}</button>
+          <button className="credit-pill" type="button" onClick={() => setPricingOpen(true)}><Sparkles size={15} />{plan === 'Пробный' ? '3 видео' : plan}</button>
           <button className="icon-button help-button" type="button" aria-label="Помощь"><CircleHelp size={19} /></button>
-          <button className="account-button" type="button" onClick={() => setAuthOpen(true)}><UserRound size={17} /><span>{signedIn ? 'Алексей' : 'Войти'}</span></button>
+          <button className="account-button" type="button" onClick={() => navigate('/dashboard')}><UserRound size={17} /><span>Алексей</span></button>
         </div>
       </header>
 
@@ -349,7 +532,7 @@ export default function Home() {
                   <p className="legal-hint">Импортируйте только видео, на использование которых у вас есть права.</p>
                 </TabsContent>
                 <TabsContent value="demo">
-                  <div className="demo-panel"><div className="demo-cover"><Play size={24} fill="currentColor" /></div><div><strong>Город после дождя</strong><span>00:33 · 4 реплики · русский</span></div><button className="secondary-button" type="button" onClick={loadDemo}>Открыть демо</button></div>
+                  <div className="demo-panel"><div className="demo-cover"><Play size={24} fill="currentColor" /></div><div><strong>Цветы крупным планом</strong><span>00:05 · 4 реплики · русский</span></div><button className="secondary-button" type="button" onClick={loadDemo}>Открыть демо</button></div>
                 </TabsContent>
               </Tabs>
             </section>
@@ -360,7 +543,7 @@ export default function Home() {
                 <span className="duration-chip"><Clock3 size={14} /> {formatTime(clipLength)}</span>
               </div>
               <div className="video-stage">
-                {videoUrl ? <video ref={videoRef} src={videoUrl} controls onLoadedMetadata={handleMetadata} /> : (
+                {videoUrl ? <video ref={videoRef} src={videoUrl} controls onLoadedMetadata={handleMetadata}><track kind="captions" label="Русские субтитры" srcLang="ru" /></video> : (
                   <button type="button" className="stage-placeholder" onClick={() => setIsPlaying(!isPlaying)}>
                     <span className="scene-light one" /><span className="scene-light two" /><span className="city-line" />
                     <span className="stage-play">{isPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}</span><span className="stage-caption">{sourceReady ? 'Демо-превью' : 'Загрузите видео, чтобы открыть превью'}</span>
@@ -382,13 +565,34 @@ export default function Home() {
             </section>
 
             {analyzed && (
-              <section className="surface lines-card">
-                <div className="section-header"><div><span className="section-index">03</span><div><h2>Запишите реплики</h2><p>Мы уже расставили таймкоды и подготовили субтитры</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
-                <div className="lines-layout">
-                  <div className="line-list">
+              <section className="surface dub-console-card">
+                <div className="section-header dub-console-header"><div><span className="section-index">03</span><div><h2>Запишите реплики</h2><p>Видео, оригинал и ваш дубль собраны в одном рабочем окне</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
+                <div className="dub-console-toolbar"><button type="button" onClick={() => setActiveSegment((value) => value <= 1 ? segments.length : value - 1)}>←</button><span>Реплика <strong>{activeSegment}</strong> / {segments.length}</span><button type="button" onClick={nextSegment}>→</button></div>
+                <div className="dub-console">
+                  <div className="dub-workbench">
+                    <div className="segment-video-wrap">
+                      <video ref={segmentVideoRef} src={videoUrl || demoVideo} playsInline controls><track kind="captions" label="Русские субтитры" srcLang="ru" /></video>
+                      <div className="segment-video-badge"><ListVideo /> {formatTime(activeLine.start)} — {formatTime(activeLine.end)}</div>
+                      {countdown !== null && <div className="record-countdown"><span>{countdown}</span><small>приготовьтесь</small></div>}
+                    </div>
+                    <div className="active-caption"><span>Герой · реплика {activeSegment}</span><input value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} aria-label="Текст активной реплики" /></div>
+                    <div className="wave-compare-head"><div><span className="legend-original"><i /> Оригинал</span><span className="legend-dub"><i /> Ваш дубль</span></div><span className={recording === activeSegment ? 'live-indicator is-live' : 'live-indicator'}><i /> {recording === activeSegment ? 'микрофон активен' : activeLine.audioUrl ? 'дубль записан' : 'готов к записи'}</span></div>
+                    <div className="live-wave-shell"><canvas ref={liveWaveRef} className="live-wave-canvas" aria-label="Сравнение громкости оригинала и живого сигнала микрофона" /><div className="wave-centerline" /></div>
+                    <div className="record-controls">
+                      <button type="button" onClick={replayOriginal}><span><Volume2 /></span><strong>Оригинал</strong><small>прослушать</small></button>
+                      <button className={recording === activeSegment ? 'main-record-control is-recording' : 'main-record-control'} type="button" onClick={() => void toggleRecord(activeSegment)} disabled={countdown !== null}><span>{recording === activeSegment ? <i /> : <Mic />}</span><strong>{recording === activeSegment ? 'Стоп' : countdown !== null ? `${countdown}…` : 'Записать'}</strong><small>{recording === activeSegment ? 'завершить дубль' : 'новый дубль'}</small></button>
+                      <button type="button" onClick={() => playTake(activeLine)} disabled={!activeLine.audioUrl}><span><Headphones /></span><strong>Мой дубль</strong><small>прослушать</small></button>
+                      <button type="button" onClick={nextSegment}><span><SkipForward /></span><strong>Дальше</strong><small>следующая реплика</small></button>
+                    </div>
+                    <div className="record-options">
+                      <div className="record-option-row"><span className="option-icon"><TimerReset /></span><span><strong>Отсчёт 3 секунды</strong><small>Даёт время приготовиться</small></span><Switch aria-label="Включить трёхсекундный отсчёт" checked={countdownEnabled} onCheckedChange={setCountdownEnabled} /></div>
+                      <div className="record-option-row"><span className="option-icon"><Headphones /></span><span><strong>Слушать оригинал</strong><small>Тихо в наушниках во время записи</small></span><Switch aria-label="Слушать оригинал во время записи" checked={originalMonitor} onCheckedChange={setOriginalMonitor} /></div>
+                    </div>
+                  </div>
+                  <div className="line-list segment-queue">
                     {segments.map((item) => (
-                      <article className={`line-item ${activeSegment === item.id ? 'is-current' : ''}`} key={item.id} onClick={() => setActiveSegment(item.id)}>
-                        <button className="line-play" type="button" aria-label={`Воспроизвести реплику ${item.id}`}><Play size={15} fill="currentColor" /></button>
+                      <article className={`line-item ${activeSegment === item.id ? 'is-current' : ''}`} key={item.id}>
+                        <button className="line-play" type="button" onClick={() => setActiveSegment(item.id)} aria-label={`Выбрать реплику ${item.id}`}><Play size={15} fill="currentColor" /></button>
                         <div className="line-copy"><span className="timecode">{formatTime(item.start)} — {formatTime(item.end)}</span><input value={item.text} onChange={(event) => updateText(item.id, event.target.value)} aria-label={`Субтитр реплики ${item.id}`} /><div className="mini-wave">{waveform.slice(0, 18).map((height, index) => <i key={index} style={{ height: `${Math.max(14, height - item.id * 6)}%` }} />)}</div></div>
                         <div className="line-actions">
                           {item.state === 'ready' && <button className="take-button" type="button" onClick={(event) => { event.stopPropagation(); playTake(item); }}><Headphones size={15} /> Дубль</button>}
@@ -399,12 +603,6 @@ export default function Home() {
                       </article>
                     ))}
                   </div>
-                  <aside className="record-panel">
-                    <span className="record-kicker">Реплика {activeSegment} из {segments.length}</span>
-                    <div className={`mic-visual ${recording ? 'is-live' : ''}`}><span><Mic size={30} /></span>{Array.from({ length: 5 }, (_, index) => <i key={index} />)}</div>
-                    <strong>{recording ? 'Говорите…' : 'Готовы к записи?'}</strong><p>Перед записью прозвучит короткий отсчёт. Шум и эхо уберём автоматически.</p>
-                    <button className="record-cta" type="button" onClick={() => void toggleRecord(activeSegment)}>{recording === activeSegment ? 'Остановить запись' : 'Начать запись'}</button><span className="shortcut"><kbd>R</kbd> быстрая запись</span>
-                  </aside>
                 </div>
               </section>
             )}
@@ -421,27 +619,19 @@ export default function Home() {
               </div>
               {assembly === 'processing' && <div className="render-state"><div><span>Собираем видео</span><strong>{assemblyProgress}%</strong></div><Progress value={assemblyProgress} /><small>Сводим голос, музыку и субтитры</small></div>}
               {assembly === 'done' ? <button className="download-button" type="button" onClick={downloadResult}><Download size={18} /> Скачать результат</button> : <button className="assemble-button" type="button" disabled={assembly === 'processing'} onClick={assembleVideo}><Sparkles size={18} /> {assembly === 'processing' ? 'Обрабатываем…' : 'Собрать видео'}</button>}
-              <p className="price-line"><span>{plan === 'Пробный' ? 'Первая обработка бесплатно' : `Тариф «${plan}» активен`}</span><ShieldCheck size={14} /> Без водяного знака</p>
+              <p className="price-line"><span>{plan === 'Пробный' ? 'Три обработки бесплатно' : `Тариф «${plan}» активен`}</span><ShieldCheck size={14} /> Без водяного знака</p>
             </section>
             <section className="aside-tip"><span className="tip-icon"><LockKeyhole size={20} /></span><div><strong>Приватный проект</strong><p>Ссылку на результат увидите только вы.</p></div></section>
-            <section id="projects" className="quota-card"><div><span>Лимит тарифа</span><strong>{plan === 'Пробный' ? '0 из 1' : '0 из 5'}</strong></div><Progress value={plan === 'Пробный' ? 8 : 2} /><button type="button" onClick={() => setPricingOpen(true)}>Получить ещё обработки <ArrowRight size={15} /></button></section>
+            <section id="projects" className="quota-card"><div><span>Лимит тарифа</span><strong>{plan === 'Пробный' ? '0 из 3' : '0 из 5'}</strong></div><Progress value={plan === 'Пробный' ? 100 : 2} /><button type="button" onClick={() => setPricingOpen(true)}>Получить ещё обработки <ArrowRight size={15} /></button></section>
           </aside>
         </div>
 
-        {message && <div className="toast-message" role="status"><Check size={17} /><span>{message}</span><button onClick={() => setMessage('')} aria-label="Закрыть сообщение"><X size={15} /></button></div>}
+        {message && <output className="toast-message"><Check size={17} /><span>{message}</span><button onClick={() => setMessage('')} aria-label="Закрыть сообщение"><X size={15} /></button></output>}
       </main>
-
-      <Dialog open={authOpen} onOpenChange={setAuthOpen}>
-        <DialogContent className="product-dialog auth-dialog">
-          <DialogHeader><span className="dialog-mark">Д</span><DialogTitle>Войти в Дублику</DialogTitle><DialogDescription>Сохраняйте проекты и продолжайте запись с любого устройства.</DialogDescription></DialogHeader>
-          <div className="provider-grid">{['VK', 'Яндекс', 'Google', 'GitHub', 'LinkedIn'].map((provider) => <button key={provider} type="button" onClick={() => demoLogin(provider)}><ProviderIcon name={provider} /><span>{provider}</span></button>)}</div>
-          <p className="dialog-legal">Продолжая, вы принимаете условия сервиса и политику конфиденциальности. Сейчас работает демонстрационный вход.</p>
-        </DialogContent>
-      </Dialog>
 
       <Dialog open={pricingOpen} onOpenChange={setPricingOpen}>
         <DialogContent className="product-dialog pricing-dialog">
-          <DialogHeader><span className="dialog-overline">простые тарифы</span><DialogTitle>Платите только за готовые видео</DialogTitle><DialogDescription>Одна бесплатная обработка для нового пользователя. Без скрытых списаний.</DialogDescription></DialogHeader>
+          <DialogHeader><span className="dialog-overline">простые тарифы</span><DialogTitle>Платите только за готовые видео</DialogTitle><DialogDescription>Три бесплатные обработки для нового пользователя. Без скрытых списаний.</DialogDescription></DialogHeader>
           <div className="plans">
             <button type="button" onClick={() => choosePlan('Старт')}><span className="plan-top"><strong>Старт</strong><em>популярный</em></span><span className="plan-price"><b>150 ₽</b><small>за пакет</small></span><span className="plan-features"><i><Check /> 5 видео до 4 минут</i><i><Check /> Full HD без водяного знака</i><i><Check /> Хранение 7 дней</i></span><span className="plan-cta">Выбрать пакет <ArrowRight /></span></button>
             <button type="button" onClick={() => choosePlan('Автор')}><span className="plan-top"><strong>Автор</strong></span><span className="plan-price"><b>490 ₽</b><small>в месяц</small></span><span className="plan-features"><i><Check /> 25 видео каждый месяц</i><i><Check /> Приоритетная обработка</i><i><Check /> Хранение 30 дней</i></span><span className="plan-cta muted">Оформить подписку <ArrowRight /></span></button>
@@ -450,5 +640,7 @@ export default function Home() {
         </DialogContent>
       </Dialog>
     </div>
+      </SidebarInset>
+    </SidebarProvider>
   );
 }
