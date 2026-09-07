@@ -766,7 +766,7 @@ export default function Home() {
 
   const path = route.split('?')[0].split('#')[0] || '/';
   const activeLine = segments.find((item) => item.id === activeSegment) ?? segments[0];
-  const activeSegmentDuration = Math.max(0.35, activeLine.end - activeLine.start);
+  const activeSegmentDuration = Math.max(0.35, (activeLine?.end ?? 2) - (activeLine?.start ?? 0));
   const recordRemaining = Math.max(0, activeSegmentDuration - recordElapsed);
   const recordProgress = Math.min(100, recordElapsed / activeSegmentDuration * 100);
   const originalIsPlaying = playback?.kind === 'original' && playback.segmentId === activeSegment;
