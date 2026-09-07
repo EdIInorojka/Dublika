@@ -372,7 +372,7 @@ export default function Home() {
         setAnalyzing(false);
         setAnalyzed(true);
         setMessage(result.transcriptionMode === 'transcribed'
-          ? `Речь распознана: ${result.segments.length} фраз по 2–4 секунды. Проверьте текст перед записью.`
+          ? `Deepgram распознал речь: ${result.segments.length} фраз по 2–4 секунды. Проверьте текст перед записью.`
           : `Создано ${result.segments.length} таймированных окон по 2–4 секунды. Автосубтитры не включены — впишите сценарий вручную.`);
         return;
       } catch (cause) {
@@ -880,7 +880,7 @@ export default function Home() {
 
             {analyzed && (
               <section className="surface dub-console-card">
-                <div className="section-header dub-console-header"><div><span className="section-index">03</span><div><h2>Запишите реплики</h2><p>{transcriptionMode === 'transcribed' ? 'Текст получен из речи. Каждое окно — 2–4 секунды.' : 'Таймированные окна по 2–4 секунды. Введите сценарий перед записью.'}</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
+                <div className="section-header dub-console-header"><div><span className="section-index">03</span><div><h2>Запишите реплики</h2><p>{transcriptionMode === 'transcribed' ? 'Текст получен от Deepgram. Каждое окно — 2–4 секунды.' : 'Таймированные окна по 2–4 секунды. Введите сценарий перед записью.'}</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
                 <div className="dub-console-toolbar"><button type="button" onClick={previousSegment} aria-label="Предыдущая реплика">←</button><span>Реплика <strong>{activeSegment}</strong> / {segments.length}</span><button type="button" onClick={nextSegment} aria-label="Следующая реплика">→</button></div>
                 <div className="dub-console">
                   <div className="dub-workbench">
@@ -890,7 +890,7 @@ export default function Home() {
                       {countdown !== null && <div className="record-countdown"><span>{countdown}</span><small>приготовьтесь</small></div>}
                       {recording === activeSegment && <div className={`live-transcript-overlay ${transcriptionState !== 'listening' ? 'is-muted' : ''}`}><Captions /><span>{liveTranscript || (transcriptionState === 'unsupported' ? 'Живая транскрипция недоступна в этом браузере' : transcriptionState === 'error' ? 'Не удалось распознать речь — текст можно ввести ниже' : 'Говорите — субтитры появятся здесь…')}</span></div>}
                     </div>
-                    <div className="active-caption"><span>{recording === activeSegment ? 'Живая транскрипция' : transcriptionMode === 'transcribed' ? `Автосубтитр · реплика ${activeSegment}` : `Сценарий · реплика ${activeSegment}`}</span><input value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} placeholder={transcriptionMode === 'transcribed' ? 'Проверьте текст реплики' : 'Введите текст, который нужно озвучить'} aria-label="Текст активной реплики" /></div>
+                    <div className="active-caption"><span>{recording === activeSegment ? 'Живая транскрипция' : transcriptionMode === 'transcribed' ? `Deepgram · реплика ${activeSegment}` : `Сценарий · реплика ${activeSegment}`}</span><input value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} placeholder={transcriptionMode === 'transcribed' ? 'Проверьте текст реплики' : 'Введите текст, который нужно озвучить'} aria-label="Текст активной реплики" /></div>
                     <div className="wave-compare-head"><div><span className="legend-original"><i /> Оригинал</span><span className="legend-dub"><i /> Ваш дубль</span></div><span className={recording === activeSegment ? 'live-indicator is-live' : 'live-indicator'}><i /> {recording === activeSegment ? 'микрофон активен' : activeLine.audioUrl ? 'дубль записан' : 'готов к записи'}</span></div>
                     <div className="live-wave-shell"><canvas ref={liveWaveRef} className="live-wave-canvas" aria-label="Сравнение громкости оригинала и живого сигнала микрофона" /><div className="wave-centerline" /></div>
                     <div className={`record-limit ${recording === activeSegment ? 'is-recording' : ''}`}><div><span>{recording === activeSegment ? 'Запись завершится автоматически' : 'Максимум для этой реплики'}</span><strong>{formatTime(recording === activeSegment ? recordRemaining : activeSegmentDuration)}</strong></div><div className="record-limit-track"><i style={{ width: `${recording === activeSegment ? recordProgress : 0}%` }} /></div></div>

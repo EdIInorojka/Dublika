@@ -330,13 +330,24 @@ function manualSegments(start, end, silenceLog) {
 }
 
 function transcriptUnits(payload, clipStart, clipEnd) {
-  const words = Array.isArray(payload.words) ? payload.words : [];
+  const utterances = Array.isArray(payload?.results?.utterances) ? payload.results.utterances : [];
+  const words = utterances.flatMap((utterance) => Array.isArray(utterance.words) ? utterance.words : []).length
+    ? utterances.flatMap((utterance) => Array.isArray(utterance.words) ? utterance.words : [])
+    : Array.isArray(payload?.results?.channels?.[0]?.alternatives?.[0]?.words)
+      ? payload.results.channels[0].alternatives[0].words
+      : Array.isArray(payload.words) ? payload.words : [];
   const wordUnits = words.map((word) => ({
     start: clipStart + Number(word.start),
     end: clipStart + Number(word.end),
-    text: String(word.word || '').trim(),
+    text: String(word.punctuated_word || word.word || '').trim(),
   })).filter((word) => Number.isFinite(word.start) && Number.isFinite(word.end) && word.end > word.start && word.end > clipStart && word.start < clipEnd && word.text);
   if (wordUnits.length) return wordUnits;
+  const utteranceUnits = utterances.map((utterance) => ({
+    start: clipStart + Number(utterance.start),
+    end: clipStart + Number(utterance.end),
+    text: String(utterance.transcript || '').trim(),
+  })).filter((utterance) => Number.isFinite(utterance.start) && Number.isFinite(utterance.end) && utterance.end > utterance.start && utterance.text);
+  if (utteranceUnits.length) return utteranceUnits;
   return (Array.isArray(payload.segments) ? payload.segments : []).map((segment) => ({
     start: clipStart + Number(segment.start),
     end: clipStart + Number(segment.end),
@@ -429,24 +440,35 @@ function writeSubtitles(project) {
   return subtitlePath;
 }
 
-async function transcribeWithOpenAI(inputPath, start, end) {
-  if (!process.env.OPENAI_API_KEY) return null;
-  // 32 kbps mono MP3 keeps a four-minute clip below the transcription API's
-  // upload limit. The previous WAV export could exceed that limit before the
-  // request even started.
+async function transcribeWithDeepgram(inputPath, start, end) {
+  if (!process.env.DEEPGRAM_API_KEY) return null;
+  // 32 kbps mono MP3 keeps a four-minute clip small and uploads quickly while
+  // retaining enough bandwidth for speech recognition.
   const audioPath = join(dataDir, `transcribe-${randomUUID()}.mp3`);
   await runFfmpeg(['-y', '-ss', String(start), '-t', String(end - start), '-i', inputPath, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '32k', audioPath]);
   try {
-    const form = new FormData();
-    form.append('file', new Blob([readFileSync(audioPath)], { type: 'audio/mpeg' }), 'clip.mp3');
-    form.append('model', process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1');
-    form.append('response_format', 'verbose_json');
-    form.append('timestamp_granularities[]', 'segment');
-    form.append('timestamp_granularities[]', 'word');
-    const result = await fetch('https://api.openai.com/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: form });
+    const query = new URLSearchParams({
+      model: process.env.DEEPGRAM_TRANSCRIBE_MODEL || 'nova-3',
+      language: process.env.DEEPGRAM_LANGUAGE || 'ru',
+      smart_format: 'true',
+      utterances: 'true',
+      utt_split: '0.55',
+      paragraphs: 'true',
+      numerals: 'true',
+      mip_opt_out: process.env.DEEPGRAM_MIP_OPT_OUT || 'true',
+    });
+    const result = await fetch(`https://api.deepgram.com/v1/listen?${query}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
+        'Content-Type': 'audio/mpeg',
+      },
+      body: readFileSync(audioPath),
+      signal: AbortSignal.timeout(120000),
+    });
     if (!result.ok) {
       const details = (await result.text()).slice(0, 400);
-      throw new Error(`Не удалось распознать речь (${result.status})${details ? `: ${details}` : ''}`);
+      throw new Error(`Deepgram не распознал речь (${result.status})${details ? `: ${details}` : ''}`);
     }
     const payload = await result.json();
     return phraseSegments(transcriptUnits(payload, start, end), start, end);
@@ -466,7 +488,7 @@ async function analyzeProject(project, body) {
   const end = Math.min(start + 240, Number(body.end) || start + 30);
   if (!(end - start >= minSegmentSeconds)) throw new Error('Выберите отрывок не короче 2 секунд');
   project.trim = { start, end };
-  let segments = await transcribeWithOpenAI(project.inputPath, start, end);
+  let segments = await transcribeWithDeepgram(project.inputPath, start, end);
   let transcriptionMode = 'transcribed';
   if (!segments?.length) {
     transcriptionMode = 'manual';
@@ -579,7 +601,8 @@ async function handleApi(request, response, url) {
     ok: true,
     ffmpeg: Boolean(ffmpegPath && existsSync(ffmpegPath)),
     ytDlp: existsSync(ytDlpPath),
-    transcription: Boolean(process.env.OPENAI_API_KEY),
+    transcription: Boolean(process.env.DEEPGRAM_API_KEY),
+    transcriptionProvider: 'deepgram',
     local: true,
   });
   const authHandled = await handleAuth(request, response, pathname);
