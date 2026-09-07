@@ -87,13 +87,6 @@ type Segment = {
   audioUrl?: string;
 };
 
-const initialSegments: Segment[] = [
-  { id: 1, start: 0.3, end: 1.2, text: 'Кажется, мы всё-таки успели.', state: 'ready' },
-  { id: 2, start: 1.3, end: 2.2, text: 'Не спеши радоваться. Смотри вперёд.', state: 'pending' },
-  { id: 3, start: 2.4, end: 3.4, text: 'Ладно. Тогда держись крепче!', state: 'pending' },
-  { id: 4, start: 3.6, end: 4.8, text: 'Вот теперь можно радоваться.', state: 'pending' },
-];
-
 const waveform = [18, 28, 34, 22, 48, 62, 38, 74, 54, 82, 44, 68, 30, 58, 72, 42, 88, 64, 46, 76, 34, 56, 84, 52, 70, 38, 60, 78, 48, 66, 26, 52, 72, 40, 58, 80, 46, 68, 36, 54, 74, 44, 62, 28, 50, 70, 38, 56];
 const demoVideo = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4';
 
@@ -134,7 +127,7 @@ export default function Home() {
   const [trim, setTrim] = useState<number[]>([36, 69]);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzed, setAnalyzed] = useState(false);
-  const [segments, setSegments] = useState(initialSegments);
+  const [segments, setSegments] = useState<Segment[]>([]);
   const [activeSegment, setActiveSegment] = useState(1);
   const [recording, setRecording] = useState<number | null>(null);
   const [message, setMessage] = useState('');
@@ -157,6 +150,8 @@ export default function Home() {
   const [resultUrl, setResultUrl] = useState('');
   const [credits, setCredits] = useState(() => Number(typeof window !== 'undefined' ? window.localStorage.getItem('dublika-credits') || 3 : 3));
   const [burnSubtitles, setBurnSubtitles] = useState(true);
+  const [transcriptionMode, setTranscriptionMode] = useState<'transcribed' | 'manual' | null>(null);
+  const [originalLevels, setOriginalLevels] = useState<number[]>(Array.from({ length: 96 }, () => 0));
 
   const clipLength = Math.max(1, trim[1] - trim[0]);
   const finishedSegments = segments.filter((item) => item.state !== 'pending').length;
@@ -199,6 +194,15 @@ export default function Home() {
     apiFetch<{ ok: boolean }>('/health').then(() => setBackendOnline(true)).catch(() => setBackendOnline(false));
   }, []);
 
+  useEffect(() => {
+    if (!projectId || !analyzed || !activeSegment) return;
+    let cancelled = false;
+    void apiFetch<{ levels: number[] }>(`/projects/${projectId}/segments/${activeSegment}/waveform`)
+      .then((result) => { if (!cancelled) setOriginalLevels(result.levels.length === 96 ? result.levels : Array.from({ length: 96 }, () => 0)); })
+      .catch(() => { if (!cancelled) setOriginalLevels(Array.from({ length: 96 }, () => 0)); });
+    return () => { cancelled = true; };
+  }, [activeSegment, analyzed, projectId]);
+
   const navigate: Navigate = (path) => {
     window.history.pushState({}, '', path);
     setRoute(path);
@@ -239,23 +243,26 @@ export default function Home() {
     setDuration(5.05);
     setTrim([0, 5.05]);
     setAnalyzed(false);
+    setSegments([]);
+    setTranscriptionMode(null);
     setMessage('Демо открыто. Подключаем его к локальному рендеру…');
     const id = await createRemoteProject(demoVideo, 'Цветы крупным планом.mp4');
     if (id) {
       try {
-        const result = await apiFetch<{ segments: Segment[] }>(`/projects/${id}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start: 0, end: 5.05 }) });
+        const result = await apiFetch<{ segments: Segment[]; transcriptionMode: 'transcribed' | 'manual' }>(`/projects/${id}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start: 0, end: 5.05 }) });
         setSegments(result.segments);
+        setTranscriptionMode(result.transcriptionMode);
         setAnalyzed(true);
         setActiveSegment(1);
-        setMessage('Демо-проект готов к реальной записи и сборке.');
+        setMessage(result.transcriptionMode === 'transcribed' ? 'Демо-проект готов: текст получен из речи.' : 'Демо не содержит распознанного текста. Введите свой сценарий в таймированные реплики.');
         return;
       } catch (cause) {
         setMessage(cause instanceof Error ? cause.message : 'Не удалось подготовить демо');
       }
     }
-    setSegments(initialSegments);
-    setAnalyzed(true);
-    setMessage('Демо открыто в режиме интерфейса. Запустите локальный сервер для MP4-рендера.');
+    setSegments([]);
+    setAnalyzed(false);
+    setMessage('Демо не удалось подготовить: локальный сервер обработки недоступен.');
   }
 
   useEffect(() => {
@@ -306,6 +313,8 @@ export default function Home() {
     setSourceName(file.name);
     setSourceReady(true);
     setAnalyzed(false);
+    setSegments([]);
+    setTranscriptionMode(null);
     setAssembly('idle');
     setResultUrl('');
     setMessage('Загружаем видео в локальный медиасервер…');
@@ -323,6 +332,8 @@ export default function Home() {
     setSourceName(value.includes('youtu') ? 'Видео с YouTube' : value.includes('vk') ? 'Видео из VK' : 'Видео по ссылке');
     setSourceReady(true);
     setAnalyzed(false);
+    setSegments([]);
+    setTranscriptionMode(null);
     setMessage(isDirect ? 'Скачиваем прямую ссылку на локальный сервер…' : 'YouTube и VK могут потребовать прямой адрес видео. Пробуем импорт…');
     const id = await createRemoteProject(value, value.includes('youtu') ? 'Видео с YouTube' : value.includes('vk') ? 'Видео из VK' : 'Видео по ссылке');
     if (id) setMessage('Видео импортировано и сохранено локально.');
@@ -337,9 +348,14 @@ export default function Home() {
 
   function handleTrim(next: number | readonly number[]) {
     const values = Array.isArray(next) ? [...next] : [0, Number(next)];
-    const [start, initialEnd] = values;
+    const [selectedStart, initialEnd] = values;
+    let start = selectedStart;
     let end = initialEnd;
     if (end - start > 240) end = start + 240;
+    if (duration >= 2 && end - start < 2) {
+      end = Math.min(duration, start + 2);
+      start = Math.max(0, end - 2);
+    }
     setTrim([Math.max(0, start), Math.min(duration, end)]);
   }
 
@@ -349,24 +365,24 @@ export default function Home() {
     setMessage('Отделяем речь, распознаём текст и ищем паузы…');
     if (projectId) {
       try {
-        const result = await apiFetch<{ segments: Segment[] }>(`/projects/${projectId}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start: trim[0], end: trim[1] }) });
+        const result = await apiFetch<{ segments: Segment[]; transcriptionMode: 'transcribed' | 'manual' }>(`/projects/${projectId}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start: trim[0], end: trim[1] }) });
         setSegments(result.segments);
         setActiveSegment(result.segments[0]?.id || 1);
+        setTranscriptionMode(result.transcriptionMode);
         setAnalyzing(false);
         setAnalyzed(true);
-        setMessage(result.segments.some((item) => item.text.startsWith('Реплика ')) ? 'Паузы найдены. Впишите рекламный текст в каждую реплику перед записью.' : 'Речь распознана и разбита на реплики. Проверьте текст перед записью.');
+        setMessage(result.transcriptionMode === 'transcribed'
+          ? `Речь распознана: ${result.segments.length} фраз по 2–4 секунды. Проверьте текст перед записью.`
+          : `Создано ${result.segments.length} таймированных окон по 2–4 секунды. Автосубтитры не включены — впишите сценарий вручную.`);
         return;
       } catch (cause) {
         setMessage(cause instanceof Error ? cause.message : 'Серверный анализ не удался');
       }
     }
-    window.setTimeout(() => {
-      const offset = trim[0];
-      setSegments(initialSegments.map((item) => ({ ...item, start: item.start + offset, end: item.end + offset, state: item.id === 1 ? 'ready' : 'pending' })));
-      setAnalyzing(false);
-      setAnalyzed(true);
-      setMessage('Готово: найдено 4 реплики. Текст можно поправить перед записью.');
-    }, 700);
+    setAnalyzing(false);
+    setAnalyzed(false);
+    setSegments([]);
+    setMessage('Нужен запущенный локальный сервер: без него нельзя честно подготовить реплики и собрать MP4.');
   }
 
   function drawWaveform(analyser?: AnalyserNode) {
@@ -389,7 +405,7 @@ export default function Home() {
     context.strokeStyle = 'rgba(239, 86, 86, .36)';
     context.lineWidth = 2;
     for (let index = 0; index < barCount; index += 1) {
-      const originalHeight = (waveform[index % waveform.length] / 100) * height * 0.7;
+      const originalHeight = Math.max(1, (originalLevels[index] || 0) * height * 0.78);
       context.beginPath();
       context.moveTo(index * gap + gap / 2, height / 2 - originalHeight / 2);
       context.lineTo(index * gap + gap / 2, height / 2 + originalHeight / 2);
@@ -429,7 +445,7 @@ export default function Home() {
     if (analyzed && recording === null) drawWaveform();
     // drawWaveform is intentionally recreated with the current segment snapshot.
     // oxlint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSegment, analyzed, recording, segments]);
+  }, [activeSegment, analyzed, originalLevels, recording, segments]);
 
   function stopPlayback() {
     if (playbackStopTimeoutRef.current) window.clearTimeout(playbackStopTimeoutRef.current);
@@ -571,8 +587,12 @@ export default function Home() {
             ? 'Лимит реплики достигнут — запись остановлена и сохранена.'
             : 'Дубль сохранён. Можно прослушать его или перейти дальше.';
         if (projectId && segmentId !== null) {
-          void apiFetch<{ ok: boolean }>(`/projects/${projectId}/segments/${segmentId}`, { method: 'POST', headers: { 'Content-Type': recorder.mimeType || 'audio/webm' }, body: blob })
-            .then(() => { setBackendOnline(true); setMessage(savedMessage); })
+          void apiFetch<{ ok: boolean; takeUrl: string }>(`/projects/${projectId}/segments/${segmentId}`, { method: 'POST', headers: { 'Content-Type': recorder.mimeType || 'audio/webm' }, body: blob })
+            .then((result) => {
+              setSegments((items) => items.map((item) => item.id === segmentId ? { ...item, audioUrl: mediaUrl(result.takeUrl) } : item));
+              setBackendOnline(true);
+              setMessage(savedMessage);
+            })
             .catch((cause) => setMessage(cause instanceof Error ? cause.message : 'Не удалось сохранить дубль на сервере'));
         } else {
           setMessage(willFinish ? savedMessage : 'Дубль сохранён в браузере. Для MP4-рендера загрузите видео через локальную версию.');
@@ -736,22 +756,7 @@ export default function Home() {
       setMessage('Готовый MP4 скачивается с этого компьютера.');
       return;
     }
-    if (videoUrl && videoUrl.startsWith('blob:')) {
-      const link = document.createElement('a');
-      link.href = videoUrl;
-      link.download = `dublika-${sourceName}`;
-      link.click();
-      setMessage('Пока скачан исходник: сначала запишите реплики и нажмите «Собрать видео».');
-      return;
-    }
-    const project = { title: sourceName, clip: { start: trim[0], end: trim[1] }, segments: segments.map(({ audioUrl: _audioUrl, ...item }) => item), status: 'demo-render' };
-    const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = 'dublika-project.json';
-    link.click();
-    URL.revokeObjectURL(link.href);
-    setMessage('Проект сохранён. Для MP4 запустите локальную обработку.');
+    setMessage('Итоговый MP4 ещё не собран. Запишите реплики и нажмите «Собрать видео».');
   }
 
   function choosePlan(name: string) {
@@ -823,7 +828,7 @@ export default function Home() {
           <div className="workspace-main">
             <section className="surface source-card">
               <div className="section-header">
-                <div><span className="section-index">01</span><div><h2>Добавьте видео</h2><p>Файл, ссылка или готовый пример</p></div></div>
+                <div><span className="section-index">01</span><div><h2>Добавьте видео</h2><p>Файл, ссылка или тестовый клип</p></div></div>
                 {sourceReady && <span className="success-chip">{uploading ? <span className="loader" /> : <Check size={14} />} {uploading ? 'Сохраняем…' : 'Загружено'}</span>}
               </div>
               <Tabs value={sourceTab} onValueChange={(value) => setSourceTab(value as SourceKind)}>
@@ -841,7 +846,7 @@ export default function Home() {
                   <p className="legal-hint">Прямые ссылки работают сразу. YouTube и VK требуют доступный медиапоток; используйте только контент, на который у вас есть права.</p>
                 </TabsContent>
                 <TabsContent value="demo">
-                  <div className="demo-panel"><div className="demo-cover"><Play size={24} fill="currentColor" /></div><div><strong>Цветы крупным планом</strong><span>00:05 · 4 реплики · русский</span></div><button className="secondary-button" type="button" onClick={loadDemo}>Открыть демо</button></div>
+                  <div className="demo-panel"><div className="demo-cover"><Play size={24} fill="currentColor" /></div><div><strong>Тестовый видеоклип</strong><span>00:05 · проверка загрузки и записи</span></div><button className="secondary-button" type="button" onClick={loadDemo}>Открыть клип</button></div>
                 </TabsContent>
               </Tabs>
             </section>
@@ -875,17 +880,17 @@ export default function Home() {
 
             {analyzed && (
               <section className="surface dub-console-card">
-                <div className="section-header dub-console-header"><div><span className="section-index">03</span><div><h2>Запишите реплики</h2><p>Видео, оригинал и ваш дубль собраны в одном рабочем окне</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
+                <div className="section-header dub-console-header"><div><span className="section-index">03</span><div><h2>Запишите реплики</h2><p>{transcriptionMode === 'transcribed' ? 'Текст получен из речи. Каждое окно — 2–4 секунды.' : 'Таймированные окна по 2–4 секунды. Введите сценарий перед записью.'}</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
                 <div className="dub-console-toolbar"><button type="button" onClick={previousSegment} aria-label="Предыдущая реплика">←</button><span>Реплика <strong>{activeSegment}</strong> / {segments.length}</span><button type="button" onClick={nextSegment} aria-label="Следующая реплика">→</button></div>
                 <div className="dub-console">
                   <div className="dub-workbench">
                     <div className="segment-video-wrap">
-                      <video ref={segmentVideoRef} src={videoUrl || demoVideo} playsInline controls onPlay={handleSegmentVideoPlay} onPause={handleSegmentVideoPause} onTimeUpdate={handleSegmentVideoTimeUpdate}><track kind="captions" label="Русские субтитры" srcLang="ru" /></video>
+                      <video ref={segmentVideoRef} src={videoUrl} playsInline controls onPlay={handleSegmentVideoPlay} onPause={handleSegmentVideoPause} onTimeUpdate={handleSegmentVideoTimeUpdate}><track kind="captions" label="Русские субтитры" srcLang="ru" /></video>
                       <div className="segment-video-badge"><ListVideo /> {formatTime(activeLine.start)} — {formatTime(activeLine.end)}</div>
                       {countdown !== null && <div className="record-countdown"><span>{countdown}</span><small>приготовьтесь</small></div>}
                       {recording === activeSegment && <div className={`live-transcript-overlay ${transcriptionState !== 'listening' ? 'is-muted' : ''}`}><Captions /><span>{liveTranscript || (transcriptionState === 'unsupported' ? 'Живая транскрипция недоступна в этом браузере' : transcriptionState === 'error' ? 'Не удалось распознать речь — текст можно ввести ниже' : 'Говорите — субтитры появятся здесь…')}</span></div>}
                     </div>
-                    <div className="active-caption"><span>{recording === activeSegment ? 'Живая транскрипция' : `Герой · реплика ${activeSegment}`}</span><input value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} aria-label="Текст активной реплики" /></div>
+                    <div className="active-caption"><span>{recording === activeSegment ? 'Живая транскрипция' : transcriptionMode === 'transcribed' ? `Автосубтитр · реплика ${activeSegment}` : `Сценарий · реплика ${activeSegment}`}</span><input value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} placeholder={transcriptionMode === 'transcribed' ? 'Проверьте текст реплики' : 'Введите текст, который нужно озвучить'} aria-label="Текст активной реплики" /></div>
                     <div className="wave-compare-head"><div><span className="legend-original"><i /> Оригинал</span><span className="legend-dub"><i /> Ваш дубль</span></div><span className={recording === activeSegment ? 'live-indicator is-live' : 'live-indicator'}><i /> {recording === activeSegment ? 'микрофон активен' : activeLine.audioUrl ? 'дубль записан' : 'готов к записи'}</span></div>
                     <div className="live-wave-shell"><canvas ref={liveWaveRef} className="live-wave-canvas" aria-label="Сравнение громкости оригинала и живого сигнала микрофона" /><div className="wave-centerline" /></div>
                     <div className={`record-limit ${recording === activeSegment ? 'is-recording' : ''}`}><div><span>{recording === activeSegment ? 'Запись завершится автоматически' : 'Максимум для этой реплики'}</span><strong>{formatTime(recording === activeSegment ? recordRemaining : activeSegmentDuration)}</strong></div><div className="record-limit-track"><i style={{ width: `${recording === activeSegment ? recordProgress : 0}%` }} /></div></div>
@@ -905,7 +910,7 @@ export default function Home() {
                     {segments.map((item) => (
                       <article className={`line-item ${activeSegment === item.id ? 'is-current' : ''}`} key={item.id}>
                         <button className="line-play" type="button" onClick={() => selectSegment(item.id)} aria-label={`Выбрать реплику ${item.id}`}><Play size={15} fill="currentColor" /></button>
-                        <div className="line-copy"><span className="timecode">{formatTime(item.start)} — {formatTime(item.end)}</span><input value={item.text} onChange={(event) => updateText(item.id, event.target.value)} aria-label={`Субтитр реплики ${item.id}`} /><div className="mini-wave">{waveform.slice(0, 18).map((height, index) => <i key={index} style={{ height: `${Math.max(14, height - item.id * 6)}%` }} />)}</div></div>
+                        <div className="line-copy"><span className="timecode">{formatTime(item.start)} — {formatTime(item.end)}</span><input value={item.text} onChange={(event) => updateText(item.id, event.target.value)} placeholder={transcriptionMode === 'transcribed' ? 'Проверьте субтитр' : 'Введите текст реплики'} aria-label={`Субтитр реплики ${item.id}`} /><div className="mini-wave">{originalLevels.slice(0, 18).map((level, index) => <i key={index} style={{ height: `${Math.max(8, level * 100)}%` }} />)}</div></div>
                         <div className="line-actions">
                           {item.state === 'ready' && <button className={`take-button ${playback?.kind === 'take' && playback.segmentId === item.id ? 'is-playing' : ''}`} type="button" onClick={(event) => { event.stopPropagation(); playTake(item); }}>{playback?.kind === 'take' && playback.segmentId === item.id ? <Pause size={15} /> : <Headphones size={15} />} {playback?.kind === 'take' && playback.segmentId === item.id ? 'Стоп' : 'Дубль'}</button>}
                           {item.state === 'original' && <span className="original-badge">Оригинал</span>}

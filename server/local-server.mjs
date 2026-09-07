@@ -19,6 +19,8 @@ const statePath = join(dataDir, 'state.json');
 const port = Number(process.env.LOCAL_APP_PORT || 8788);
 const maxVideoBytes = 1024 * 1024 * 1024;
 const maxAudioBytes = 40 * 1024 * 1024;
+const minSegmentSeconds = 2;
+const maxSegmentSeconds = 4;
 const videoExtensions = new Set(['.mp4', '.mov', '.webm', '.mkv', '.m4v']);
 const audioExtensions = new Set(['.webm', '.ogg', '.wav', '.m4a', '.mp3', '.mp4']);
 const allowedOrigins = new Set([
@@ -197,6 +199,31 @@ function runFfmpeg(argumentsList, onProgress) {
   });
 }
 
+function runFfmpegBuffer(argumentsList, maximumBytes = 1024 * 1024) {
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawn(ffmpegPath, argumentsList, { windowsHide: true });
+    const chunks = [];
+    let size = 0;
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > maximumBytes) {
+        child.kill();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-5000); });
+    child.on('error', rejectRun);
+    child.on('close', (code) => {
+      if (size > maximumBytes) return rejectRun(new Error('Слишком большая аудиодорожка для предпросмотра'));
+      if (code === 0) return resolveRun(Buffer.concat(chunks));
+      return rejectRun(new Error(stderr || `ffmpeg exited ${code}`));
+    });
+  });
+}
+
 function runProcess(executable, argumentsList, timeoutMs = 15 * 60 * 1000) {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(executable, argumentsList, { windowsHide: true });
@@ -219,27 +246,166 @@ async function sourceHasAudio(path) {
   try { await runFfmpeg(['-hide_banner', '-i', path, '-map', '0:a:0', '-t', '0.1', '-f', 'null', '-']); return true; } catch { return false; }
 }
 
-function fallbackSegments(start, end, silenceLog) {
+async function waveformForSegment(project, segment) {
+  const cached = project.waveforms?.[segment.id];
+  if (Array.isArray(cached) && cached.length === 96) return cached;
+  let samples;
+  try {
+    samples = await runFfmpegBuffer([
+      '-v', 'error', '-ss', String(segment.start), '-t', String(segment.end - segment.start),
+      '-i', project.inputPath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', '-',
+    ], 256 * 1024);
+  } catch {
+    return Array.from({ length: 96 }, () => 0);
+  }
+  const levels = [];
+  const sampleCount = Math.floor(samples.length / 2);
+  for (let bucket = 0; bucket < 96; bucket += 1) {
+    const from = Math.floor(bucket * sampleCount / 96);
+    const to = Math.max(from + 1, Math.floor((bucket + 1) * sampleCount / 96));
+    let sum = 0;
+    for (let index = from; index < to && index < sampleCount; index += 1) {
+      const value = samples.readInt16LE(index * 2) / 32768;
+      sum += value * value;
+    }
+    levels.push(rounded(Math.min(1, Math.sqrt(sum / Math.max(1, to - from)) * 2.4)));
+  }
+  project.waveforms ??= {};
+  project.waveforms[segment.id] = levels;
+  saveState();
+  return levels;
+}
+
+function rounded(value) {
+  return Number(Number(value).toFixed(2));
+}
+
+function hasPhraseEnd(value) {
+  return /[.!?…;:]$/.test(String(value || '').trim());
+}
+
+/**
+ * Return actual quiet points from ffmpeg's silencedetect output.  They are only
+ * used as preferred cuts; the duration limits below always win.  This matters
+ * because a breath or a tiny gap must never become an unusable 0.9 s take.
+ */
+function silenceCuts(silenceLog, start, end) {
+  const starts = [...silenceLog.matchAll(/silence_start:\s*([\d.]+)/g)].map((match) => Number(match[1]));
+  const ends = [...silenceLog.matchAll(/silence_end:\s*([\d.]+)/g)].map((match) => Number(match[1]));
+  return ends.map((silenceEnd, index) => {
+    const silenceStart = starts[index];
+    return Number.isFinite(silenceStart) && Number.isFinite(silenceEnd)
+      ? start + (silenceStart + silenceEnd) / 2
+      : null;
+  }).filter((value) => value && value > start && value < end);
+}
+
+/**
+ * No-STT fallback. It deliberately returns empty text rather than invented
+ * captions. The editor can then be used as a timed script sheet.
+ */
+function manualSegments(start, end, silenceLog) {
   const duration = end - start;
-  const silenceStarts = [...silenceLog.matchAll(/silence_start:\s*([\d.]+)/g)].map((match) => Number(match[1]));
-  const silenceEnds = [...silenceLog.matchAll(/silence_end:\s*([\d.]+)/g)].map((match) => Number(match[1]));
-  const boundaries = [0];
-  silenceEnds.forEach((silenceEnd, index) => {
-    const silenceStart = silenceStarts[index];
-    if (Number.isFinite(silenceStart) && Number.isFinite(silenceEnd)) boundaries.push((silenceStart + silenceEnd) / 2);
-  });
-  boundaries.push(duration);
-  const segments = [];
-  for (let index = 0; index < boundaries.length - 1; index += 1) {
-    const segmentStart = Math.max(0, boundaries[index]);
-    const segmentEnd = Math.min(duration, boundaries[index + 1]);
-    if (segmentEnd - segmentStart >= 0.55) segments.push({ start: start + segmentStart, end: start + segmentEnd });
+  if (duration < minSegmentSeconds) throw new Error('Выберите отрывок не короче 2 секунд');
+  let count = Math.ceil(duration / maxSegmentSeconds);
+  while (count > 1 && duration / count < minSegmentSeconds) count -= 1;
+  const cuts = silenceCuts(silenceLog, start, end);
+  const boundaries = [start];
+  for (let index = 1; index < count; index += 1) {
+    const previous = boundaries[index - 1];
+    const remaining = count - index;
+    const nominal = start + duration * index / count;
+    const lower = Math.max(previous + minSegmentSeconds, end - remaining * maxSegmentSeconds);
+    const upper = Math.min(previous + maxSegmentSeconds, end - remaining * minSegmentSeconds);
+    const suitable = cuts.filter((cut) => cut >= lower && cut <= upper);
+    const chosen = suitable.sort((left, right) => Math.abs(left - nominal) - Math.abs(right - nominal))[0];
+    boundaries.push(chosen ?? Math.min(upper, Math.max(lower, nominal)));
   }
-  if (segments.length < 2) {
-    const count = Math.min(8, Math.max(1, Math.ceil(duration / 6)));
-    return Array.from({ length: count }, (_, index) => ({ start: start + duration * index / count, end: start + duration * (index + 1) / count }));
+  boundaries.push(end);
+  return boundaries.slice(0, -1).map((segmentStart, index) => ({
+    start: rounded(segmentStart),
+    end: rounded(boundaries[index + 1]),
+    text: '',
+  }));
+}
+
+function transcriptUnits(payload, clipStart, clipEnd) {
+  const words = Array.isArray(payload.words) ? payload.words : [];
+  const wordUnits = words.map((word) => ({
+    start: clipStart + Number(word.start),
+    end: clipStart + Number(word.end),
+    text: String(word.word || '').trim(),
+  })).filter((word) => Number.isFinite(word.start) && Number.isFinite(word.end) && word.end > word.start && word.end > clipStart && word.start < clipEnd && word.text);
+  if (wordUnits.length) return wordUnits;
+  return (Array.isArray(payload.segments) ? payload.segments : []).map((segment) => ({
+    start: clipStart + Number(segment.start),
+    end: clipStart + Number(segment.end),
+    text: String(segment.text || '').trim(),
+  })).filter((segment) => Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start && segment.text);
+}
+
+/**
+ * Build one script cue per natural phrase. A word end, sentence punctuation or
+ * natural pause can be a boundary, but every recordable window is 2–4 seconds.
+ */
+function phraseSegments(units, clipStart, clipEnd) {
+  const inClip = units.map((unit) => ({
+    ...unit,
+    start: Math.max(clipStart, unit.start),
+    end: Math.min(clipEnd, unit.end),
+  })).filter((unit) => unit.end > unit.start);
+  if (!inClip.length) return [];
+  const groups = [];
+  let group = [];
+  const commit = () => {
+    if (!group.length) return;
+    groups.push(group);
+    group = [];
+  };
+  for (const unit of inClip) {
+    if (!group.length) {
+      group.push(unit);
+      continue;
+    }
+    const groupStart = group[0].start;
+    const candidateDuration = unit.end - groupStart;
+    const groupDuration = group[group.length - 1].end - groupStart;
+    const gap = unit.start - group[group.length - 1].end;
+    const shouldCut = groupDuration >= minSegmentSeconds && (
+      candidateDuration > maxSegmentSeconds + 0.12 ||
+      (hasPhraseEnd(group[group.length - 1].text) && groupDuration >= 2.25) ||
+      (gap >= 0.35 && groupDuration >= 2.15)
+    );
+    if (shouldCut) commit();
+    group.push(unit);
   }
-  return segments.slice(0, 24);
+  commit();
+
+  // A trailing short phrase is still useful text. Merge it only when doing so
+  // keeps a take under four seconds; otherwise give it a two-second cue window.
+  if (groups.length > 1) {
+    const last = groups[groups.length - 1];
+    const lastDuration = last[last.length - 1].end - last[0].start;
+    const previous = groups[groups.length - 2];
+    if (lastDuration < minSegmentSeconds && last[last.length - 1].end - previous[0].start <= maxSegmentSeconds + 0.12) {
+      previous.push(...last);
+      groups.pop();
+    }
+  }
+
+  return groups.slice(0, 80).map((group) => {
+    const phraseStart = group[0].start;
+    const phraseEnd = group[group.length - 1].end;
+    // A little lead-in/out makes the cue pleasant to perform while preventing
+    // sub-two-second recording windows. It does not change the source text.
+    const cueStart = Math.max(clipStart, phraseStart - 0.12);
+    const cueEnd = Math.min(clipEnd, Math.max(phraseEnd + 0.18, cueStart + minSegmentSeconds));
+    return {
+      start: rounded(cueStart),
+      end: rounded(Math.min(cueStart + maxSegmentSeconds, cueEnd)),
+      text: group.map((unit) => unit.text).join(' ').replace(/\s+([,.!?…;:])/g, '$1').trim(),
+    };
+  }).filter((segment) => segment.end - segment.start >= minSegmentSeconds - 0.02);
 }
 
 function srtTime(value) {
@@ -265,20 +431,27 @@ function writeSubtitles(project) {
 
 async function transcribeWithOpenAI(inputPath, start, end) {
   if (!process.env.OPENAI_API_KEY) return null;
-  const wavPath = join(dataDir, `transcribe-${randomUUID()}.wav`);
-  await runFfmpeg(['-y', '-ss', String(start), '-t', String(end - start), '-i', inputPath, '-vn', '-ac', '1', '-ar', '16000', wavPath]);
+  // 32 kbps mono MP3 keeps a four-minute clip below the transcription API's
+  // upload limit. The previous WAV export could exceed that limit before the
+  // request even started.
+  const audioPath = join(dataDir, `transcribe-${randomUUID()}.mp3`);
+  await runFfmpeg(['-y', '-ss', String(start), '-t', String(end - start), '-i', inputPath, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '32k', audioPath]);
   try {
     const form = new FormData();
-    form.append('file', new Blob([readFileSync(wavPath)], { type: 'audio/wav' }), 'clip.wav');
+    form.append('file', new Blob([readFileSync(audioPath)], { type: 'audio/mpeg' }), 'clip.mp3');
     form.append('model', process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1');
     form.append('response_format', 'verbose_json');
     form.append('timestamp_granularities[]', 'segment');
+    form.append('timestamp_granularities[]', 'word');
     const result = await fetch('https://api.openai.com/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: form });
-    if (!result.ok) throw new Error(`transcription_http_${result.status}`);
+    if (!result.ok) {
+      const details = (await result.text()).slice(0, 400);
+      throw new Error(`Не удалось распознать речь (${result.status})${details ? `: ${details}` : ''}`);
+    }
     const payload = await result.json();
-    return (payload.segments || []).filter((item) => item.end > item.start).slice(0, 40).map((item) => ({ start: start + item.start, end: Math.min(end, start + item.end), text: String(item.text || '').trim() }));
+    return phraseSegments(transcriptUnits(payload, start, end), start, end);
   } finally {
-    try { unlinkSync(wavPath); } catch { /* best-effort cleanup */ }
+    try { unlinkSync(audioPath); } catch { /* best-effort cleanup */ }
   }
 }
 
@@ -291,19 +464,23 @@ function projectFor(request, id) {
 async function analyzeProject(project, body) {
   const start = Math.max(0, Number(body.start) || 0);
   const end = Math.min(start + 240, Number(body.end) || start + 30);
-  if (!(end > start)) throw new Error('Некорректный отрывок');
+  if (!(end - start >= minSegmentSeconds)) throw new Error('Выберите отрывок не короче 2 секунд');
   project.trim = { start, end };
   let segments = await transcribeWithOpenAI(project.inputPath, start, end);
+  let transcriptionMode = 'transcribed';
   if (!segments?.length) {
+    transcriptionMode = 'manual';
     let log = '';
     try { log = await runFfmpeg(['-hide_banner', '-ss', String(start), '-t', String(end - start), '-i', project.inputPath, '-vn', '-af', 'silencedetect=noise=-32dB:d=0.32', '-f', 'null', '-']); } catch (error) { log = String(error.message || ''); }
-    segments = fallbackSegments(start, end, log).map((item, index) => ({ ...item, text: `Реплика ${index + 1} — нажмите, чтобы вписать текст` }));
+    segments = manualSegments(start, end, log);
   }
-  project.segments = segments.map((item, index) => ({ id: index + 1, start: Number(item.start.toFixed(2)), end: Number(item.end.toFixed(2)), text: item.text || `Реплика ${index + 1}`, state: 'pending' }));
+  project.segments = segments.map((item, index) => ({ id: index + 1, start: rounded(item.start), end: rounded(item.end), text: String(item.text || ''), state: 'pending' }));
+  project.transcriptionMode = transcriptionMode;
+  project.waveforms = {};
   project.status = 'ready';
   project.updatedAt = new Date().toISOString();
   saveState();
-  return project.segments;
+  return { segments: project.segments, transcriptionMode };
 }
 
 async function renderProject(user, project, burnSubtitles = true) {
@@ -398,7 +575,13 @@ async function downloadPlatformVideo(value, destination) {
 
 async function handleApi(request, response, url) {
   const { pathname } = url;
-  if (pathname === '/api/health') return sendJson(response, 200, { ok: true, ffmpeg: Boolean(ffmpegPath && existsSync(ffmpegPath)), ytDlp: existsSync(ytDlpPath), local: true });
+  if (pathname === '/api/health') return sendJson(response, 200, {
+    ok: true,
+    ffmpeg: Boolean(ffmpegPath && existsSync(ffmpegPath)),
+    ytDlp: existsSync(ytDlpPath),
+    transcription: Boolean(process.env.OPENAI_API_KEY),
+    local: true,
+  });
   const authHandled = await handleAuth(request, response, pathname);
   if (authHandled !== false) return authHandled;
 
@@ -438,17 +621,23 @@ async function handleApi(request, response, url) {
     return sendJson(response, 200, { projects, credits: user.credits, plan: user.plan });
   }
 
-  const projectMatch = pathname.match(/^\/api\/projects\/([a-f0-9-]+)(?:\/(analyze|render|status|segments\/([0-9]+)))?$/i);
+  const projectMatch = pathname.match(/^\/api\/projects\/([a-f0-9-]+)(?:\/(analyze|render|status)|\/segments\/([0-9]+)(\/waveform)?)?$/i);
   if (!projectMatch) return sendJson(response, 404, { error: 'Маршрут не найден' });
   const access = projectFor(request, projectMatch[1]);
   if (!access) return sendJson(response, 404, { error: 'Проект не найден' });
   const { user, project } = access;
   const action = projectMatch[2];
+  const segmentId = Number(projectMatch[3]);
+  const wantsWaveform = Boolean(projectMatch[4]);
 
-  if (!action && request.method === 'GET') return sendJson(response, 200, { project: { ...project, inputPath: undefined, outputPath: undefined }, credits: user.credits });
-  if (action === 'analyze' && request.method === 'POST') return sendJson(response, 200, { segments: await analyzeProject(project, await readJson(request)) });
-  if (action?.startsWith('segments/') && request.method === 'POST') {
-    const segmentId = Number(projectMatch[3]);
+  if (!action && !Number.isFinite(segmentId) && request.method === 'GET') return sendJson(response, 200, { project: { ...project, inputPath: undefined, outputPath: undefined }, credits: user.credits });
+  if (action === 'analyze' && request.method === 'POST') return sendJson(response, 200, await analyzeProject(project, await readJson(request)));
+  if (wantsWaveform && request.method === 'GET') {
+    const segment = project.segments.find((item) => item.id === segmentId);
+    if (!segment) return sendJson(response, 404, { error: 'Реплика не найдена' });
+    return sendJson(response, 200, { levels: await waveformForSegment(project, segment) });
+  }
+  if (Number.isFinite(segmentId) && request.method === 'POST') {
     if (!project.segments.some((segment) => segment.id === segmentId)) return sendJson(response, 404, { error: 'Реплика не найдена' });
     const type = String(request.headers['content-type'] || 'audio/webm').split(';')[0];
     const extension = type.includes('ogg') ? '.ogg' : type.includes('wav') ? '.wav' : type.includes('mp4') ? '.m4a' : '.webm';
@@ -460,7 +649,7 @@ async function handleApi(request, response, url) {
     segment.state = 'ready';
     project.updatedAt = new Date().toISOString();
     saveState();
-    return sendJson(response, 201, { ok: true, segmentId });
+    return sendJson(response, 201, { ok: true, segmentId, takeUrl: `/media/projects/${project.id}/takes/${segmentId}` });
   }
   if (action === 'render' && request.method === 'POST') {
     if (project.status === 'processing') return sendJson(response, 409, { error: 'Рендер уже выполняется' });
@@ -517,6 +706,12 @@ const server = createServer(async (request, response) => {
     if (projectSource) {
       const project = state.projects[projectSource[1]];
       return project?.inputPath && existsSync(project.inputPath) ? sendFile(request, response, project.inputPath) : sendJson(response, 404, { error: 'Файл не найден' });
+    }
+    const projectTake = url.pathname.match(/^\/media\/projects\/([a-f0-9-]+)\/takes\/([0-9]+)$/i);
+    if (projectTake) {
+      const project = state.projects[projectTake[1]];
+      const take = project?.recordings?.[Number(projectTake[2])];
+      return take?.path && existsSync(take.path) ? sendFile(request, response, take.path) : sendJson(response, 404, { error: 'Запись не найдена' });
     }
     const relative = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, '').replace(/^[/\\]+/, '');
     let path = join(publicDir, relative || 'index.html');
