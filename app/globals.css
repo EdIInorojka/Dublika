@@ -575,7 +575,7 @@ h1 em { color: #397c5d; font-style: normal; }
    rail competing with the actual work. */
 .dub-console { display: flex; flex-direction: column; min-height: 0; }
 .dub-workbench { width: 100%; border-right: 0; }
-.segment-queue { order: -1; max-height: none; min-height: 126px; display: flex; align-items: stretch; gap: 8px; overflow-x: auto; overflow-y: hidden; padding: 10px 14px; border-bottom: 1px solid #293830; background: #0d1511; scrollbar-color: #6f9177 #16221b; scrollbar-width: thin; }
+.segment-queue { order: 1; max-height: none; min-height: 126px; display: flex; align-items: stretch; gap: 8px; overflow-x: auto; overflow-y: hidden; padding: 10px 14px; border-top: 1px solid #293830; background: #0d1511; scrollbar-color: #6f9177 #16221b; scrollbar-width: thin; }
 .segment-queue-head { position: static; top: auto; z-index: auto; flex: 0 0 142px; display: flex; flex-direction: column; justify-content: center; gap: 8px; margin: 0; padding: 4px 8px 4px 1px; background: transparent; }
 .segment-queue-head > div:first-child { font-size: .65rem; }
 .segment-queue-head > div:first-child strong { color: var(--acid); }
@@ -605,7 +605,7 @@ h1 em { color: #397c5d; font-style: normal; }
 
 @media (max-width: 720px) {
   .studio-app-shell.is-recording-stage .dub-console { display: flex; flex-direction: column; min-height: 0; grid-template-columns: none; }
-  .studio-app-shell.is-recording-stage .segment-queue { order: -1; flex: 0 0 70px; min-height: 70px; display: flex; align-items: center; gap: 7px; padding: 7px 10px; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid #293830; }
+  .studio-app-shell.is-recording-stage .segment-queue { order: 1; flex: 0 0 70px; min-height: 70px; display: flex; align-items: center; gap: 7px; padding: 7px 10px; overflow-x: auto; overflow-y: hidden; border-top: 1px solid #293830; }
   .studio-app-shell.is-recording-stage .segment-queue-head { flex: 0 0 74px; gap: 3px; margin: 0; padding: 0 5px 0 0; }
   .studio-app-shell.is-recording-stage .segment-queue-head > div:first-child { display: flex; align-items: baseline; gap: 4px; font-size: .52rem; }
   .studio-app-shell.is-recording-stage .segment-queue-head > div:first-child span { display: block; }
