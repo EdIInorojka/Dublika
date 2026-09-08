@@ -3,7 +3,7 @@
 function apiOrigin() {
   // A public media worker can be injected at build time for a shared preview.
   // Keep local loopback as the safe default for developer and offline use.
-  const publicOrigin = String((import.meta as { env?: Record<string, string | undefined> }).env?.VITE_API_ORIGIN || '').trim().replace(/\/$/, '');
+  const publicOrigin = String(import.meta.env.VITE_API_ORIGIN || '').trim().replace(/\/$/, '');
   if (publicOrigin) return publicOrigin;
   const { hostname, origin } = window.location;
   if (hostname === 'localhost' || hostname === '127.0.0.1') return origin;
