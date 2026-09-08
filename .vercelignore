@@ -1,3 +1,10 @@
 .env*
 *.tsbuildinfo
 ключ.txt
+.local-data/
+.local-bin/
+vercel-dist/
+dist/
+.wrangler/
+outputs/
+work/
