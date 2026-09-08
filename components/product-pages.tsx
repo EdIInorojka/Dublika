@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -51,7 +51,7 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from '@/components/ui/sidebar';
-import { apiFetch } from '@/lib/local-api';
+import { apiFetch, mediaUrl } from '@/lib/local-api';
 
 export type Navigate = (path: string) => void;
 
@@ -377,8 +377,43 @@ function DashboardHome({ navigate }: Pick<PageProps, 'navigate'>) {
   );
 }
 
+type LibraryProject = {
+  id: string;
+  title: string;
+  status: 'uploaded' | 'ready' | 'processing' | 'done' | 'failed';
+  progress?: number;
+  clips?: Array<{ start: number; end: number }>;
+  trim?: { start: number; end: number } | null;
+  segments?: unknown[];
+  outputUrl?: string | null;
+  updatedAt?: string;
+};
+
+function libraryDuration(project: LibraryProject) {
+  const seconds = project.clips?.length ? project.clips.reduce((total, clip) => total + clip.end - clip.start, 0) : project.trim ? project.trim.end - project.trim.start : 0;
+  return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
+}
+
 function VideosPage({ navigate }: Pick<PageProps, 'navigate'>) {
-  return <div className="dashboard-content"><section className="inner-heading"><div><span>ваша библиотека</span><h1>Мои видео</h1><p>Черновики, готовые дубляжи и общие проекты.</p></div><button onClick={() => navigate('/catalog')}><Plus /> Новое видео</button></section><div className="library-tabs"><button className="is-active">Все <span>0</span></button><button>Черновики <span>0</span></button><button>Готовые <span>0</span></button><button>Общие <span>0</span></button></div><section className="library-empty"><div className="empty-reel"><Film /><span /></div><h2>Пока ни одного видео</h2><p>Первый дубляж займёт несколько минут. Выберите готовую сцену или загрузите свою.</p><button onClick={() => navigate('/catalog')}>Выбрать сцену <ArrowRight /></button></section></div>;
+  const [projects, setProjects] = useState<LibraryProject[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [filter, setFilter] = useState<'all' | 'draft' | 'done'>('all');
+
+  useEffect(() => {
+    let cancelled = false;
+    void apiFetch<{ projects: LibraryProject[] }>('/projects')
+      .then((result) => { if (!cancelled) setProjects(result.projects.sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')))); })
+      .catch((cause) => { if (!cancelled) setError(cause instanceof Error ? cause.message : 'Не удалось загрузить библиотеку'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const visible = projects.filter((project) => filter === 'all' || filter === 'done' ? filter !== 'done' || project.status === 'done' : project.status !== 'done');
+  const drafts = projects.filter((project) => project.status !== 'done').length;
+  const completed = projects.filter((project) => project.status === 'done').length;
+  const statusLabel: Record<LibraryProject['status'], string> = { uploaded: 'Видео загружено', ready: 'Черновик', processing: 'Собирается', done: 'Готово', failed: 'Нужна проверка' };
+  return <div className="dashboard-content"><section className="inner-heading"><div><span>ваша библиотека</span><h1>Мои видео</h1><p>Черновики, готовые дубляжи и общие проекты.</p></div><button onClick={() => navigate('/studio')}><Plus /> Новое видео</button></section><div className="library-tabs"><button className={filter === 'all' ? 'is-active' : ''} onClick={() => setFilter('all')}>Все <span>{projects.length}</span></button><button className={filter === 'draft' ? 'is-active' : ''} onClick={() => setFilter('draft')}>Черновики <span>{drafts}</span></button><button className={filter === 'done' ? 'is-active' : ''} onClick={() => setFilter('done')}>Готовые <span>{completed}</span></button></div>{loading ? <section className="library-empty"><div className="empty-reel"><Film /><span /></div><h2>Загружаем библиотеку…</h2><p>Проверяем проекты на локальном медиасервере.</p></section> : error ? <section className="library-empty"><div className="empty-reel"><FileVideo /><span /></div><h2>Библиотека пока недоступна</h2><p>{error}</p><button onClick={() => window.location.reload()}>Повторить <ArrowRight /></button></section> : visible.length ? <section className="video-library">{visible.map((project) => <article key={project.id}><div className="video-library-thumb"><Film /><span>{project.status === 'done' ? <BadgeCheck /> : <FileVideo />}</span></div><div className="video-library-copy"><span>{statusLabel[project.status]}</span><h2>{project.title.replace(/\.[^.]+$/, '')}</h2><p>{libraryDuration(project)} · {project.segments?.length || 0} реплик · {project.clips?.length || 1} фрагм.</p>{project.status === 'processing' && <Progress value={project.progress || 0} />}</div><div className="video-library-actions">{project.status === 'done' && project.outputUrl && <a href={mediaUrl(project.outputUrl)} target="_blank" rel="noreferrer"><Play /> Открыть MP4</a>}<button type="button" onClick={() => navigate(`/studio?project=${project.id}`)}>{project.status === 'done' ? 'Открыть проект' : 'Продолжить'} <ArrowRight /></button></div></article>)}</section> : <section className="library-empty"><div className="empty-reel"><Film /><span /></div><h2>Пока ни одного видео</h2><p>Первый дубляж займёт несколько минут. Выберите готовую сцену или загрузите свою.</p><button onClick={() => navigate('/studio')}>Создать видео <ArrowRight /></button></section>}</div>;
 }
 
 function GuidePage({ navigate }: Pick<PageProps, 'navigate'>) {

@@ -21,6 +21,7 @@ import {
   Music2,
   Pause,
   Play,
+  Plus,
   RotateCcw,
   Scissors,
   ShieldCheck,
@@ -91,7 +92,16 @@ type Segment = {
   end: number;
   text: string;
   state: SegmentState;
+  clipId?: string;
+  outputStart?: number;
+  outputEnd?: number;
   audioUrl?: string;
+};
+
+type Clip = {
+  id: string;
+  start: number;
+  end: number;
 };
 
 // Used only before the local media service has returned an actual waveform.
@@ -99,6 +109,8 @@ const fallbackWaveform = [18, 28, 34, 22, 48, 62, 38, 74, 54, 82, 44, 68, 30, 58
 const demoVideo = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4';
 const recordingLeadSeconds = 1;
 const recordingTailSeconds = 1;
+const maxSelectedSeconds = 240;
+const maxSelectedClips = 6;
 
 function formatTime(value: number) {
   const minutes = Math.floor(value / 60);
@@ -111,6 +123,8 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLButtonElement>(null);
+  const timelineDragRef = useRef<'start' | 'end' | null>(null);
+  const openedProjectRef = useRef<string | null>(null);
   const segmentVideoRef = useRef<HTMLVideoElement>(null);
   const liveWaveRef = useRef<HTMLCanvasElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -137,6 +151,8 @@ export default function Home() {
   const [videoUrl, setVideoUrl] = useState('');
   const [duration, setDuration] = useState(192);
   const [trim, setTrim] = useState<number[]>([36, 69]);
+  const [clips, setClips] = useState<Clip[]>([{ id: 'clip-1', start: 36, end: 69 }]);
+  const [activeClipId, setActiveClipId] = useState('clip-1');
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzed, setAnalyzed] = useState(false);
   const [segments, setSegments] = useState<Segment[]>([]);
@@ -167,7 +183,7 @@ export default function Home() {
   const [editorLevels, setEditorLevels] = useState<number[]>([]);
   const [editorPlayhead, setEditorPlayhead] = useState(0);
 
-  const clipLength = Math.max(1, trim[1] - trim[0]);
+  const clipLength = Math.max(1, clips.reduce((total, clip) => total + Math.max(0, clip.end - clip.start), 0));
   const finishedSegments = segments.filter((item) => item.state !== 'pending').length;
   const pendingSegments = segments.filter((item) => item.state === 'pending').length;
   const allSegmentsFinished = analyzed && segments.length > 0 && pendingSegments === 0;
@@ -178,8 +194,6 @@ export default function Home() {
     [],
   );
   const editorWaveform = projectId && editorLevels.length === 96 ? editorLevels.map((level) => Math.max(10, level * 100)) : fallbackWaveform;
-  const selectionStart = Math.min(100, Math.max(0, trim[0] / Math.max(duration, 1) * 100));
-  const selectionEnd = Math.min(100, Math.max(selectionStart, trim[1] / Math.max(duration, 1) * 100));
   const playheadPosition = Math.min(100, Math.max(0, editorPlayhead / Math.max(duration, 1) * 100));
 
   function recordingWindow(segment: Segment) {
@@ -189,13 +203,16 @@ export default function Home() {
     // count-in is trimmed during final mixing, so the spoken line stays synced.
     const leadIn = recordingLeadSeconds;
     const tailOut = recordingTailSeconds;
+    const sourceClip = clips.find((clip) => clip.id === segment.clipId)
+      ?? clips.find((clip) => segment.start >= clip.start - .01 && segment.end <= clip.end + .01)
+      ?? { start: trim[0], end: trim[1] };
     return {
       leadIn,
       tailOut,
       phraseDuration,
       duration: phraseDuration + leadIn + tailOut,
-      start: Math.max(trim[0], segment.start - leadIn),
-      end: Math.min(trim[1], segment.end + tailOut),
+      start: Math.max(sourceClip.start, segment.start - leadIn),
+      end: Math.min(sourceClip.end, segment.end + tailOut),
     };
   }
 
@@ -228,6 +245,58 @@ export default function Home() {
   useEffect(() => {
     apiFetch<{ ok: boolean }>('/health').then(() => setBackendOnline(true)).catch(() => setBackendOnline(false));
   }, []);
+
+  useEffect(() => {
+    const query = route.includes('?') ? route.slice(route.indexOf('?') + 1).split('#')[0] : '';
+    const requestedId = new URLSearchParams(query).get('project');
+    if (!requestedId || requestedId === openedProjectRef.current) return;
+    let cancelled = false;
+    openedProjectRef.current = requestedId;
+    type StoredProject = {
+      id: string;
+      title: string;
+      inputUrl: string;
+      outputUrl?: string | null;
+      status: string;
+      trim?: { start: number; end: number } | null;
+      clips?: Clip[];
+      segments: Segment[];
+      transcriptionMode?: 'transcribed' | 'manual';
+    };
+    void apiFetch<{ project: StoredProject; credits: number }>(`/projects/${requestedId}`)
+      .then(({ project, credits: nextCredits }) => {
+        if (cancelled) return;
+        const savedClips = Array.isArray(project.clips) && project.clips.length
+          ? project.clips
+          : project.trim ? [{ id: 'clip-1', start: project.trim.start, end: project.trim.end }] : [];
+        if (!savedClips.length) throw new Error('В проекте ещё нет выбранных фрагментов');
+        const firstClip = savedClips[0];
+        setProjectId(project.id);
+        setSourceName(project.title);
+        setVideoUrl(mediaUrl(project.inputUrl));
+        setSourceReady(true);
+        setClips(savedClips);
+        setActiveClipId(firstClip.id);
+        setTrim([firstClip.start, firstClip.end]);
+        setSegments(project.segments.map((segment) => segment.audioUrl ? { ...segment, audioUrl: mediaUrl(segment.audioUrl) } : segment));
+        setActiveSegment(project.segments[0]?.id || 1);
+        setTranscriptionMode(project.transcriptionMode || (project.segments.some((segment) => segment.text) ? 'transcribed' : null));
+        setAnalyzed(project.segments.length > 0);
+        setAssembly(project.status === 'done' && project.outputUrl ? 'done' : 'idle');
+        setResultUrl(project.outputUrl ? mediaUrl(project.outputUrl) : '');
+        setCredits(nextCredits);
+        setEditorLevels([]);
+        setBackendOnline(true);
+        setMessage(`Открыт проект «${project.title}». Можно продолжить с любой реплики.`);
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          openedProjectRef.current = null;
+          setMessage(cause instanceof Error ? cause.message : 'Не удалось открыть проект');
+        }
+      });
+    return () => { cancelled = true; };
+  }, [route]);
 
   useEffect(() => {
     if (!projectId || !analyzed || !activeSegment) return;
@@ -295,7 +364,7 @@ export default function Home() {
     setSourceName('Цветы крупным планом.mp4');
     setVideoUrl(demoVideo);
     setDuration(5.05);
-    setTrim([0, 5.05]);
+    setSingleClip(0, 5.05);
     setAnalyzed(false);
     setSegments([]);
     setTranscriptionMode(null);
@@ -398,8 +467,26 @@ export default function Home() {
     const nextDuration = videoRef.current?.duration;
     if (!nextDuration || !Number.isFinite(nextDuration)) return;
     setDuration(nextDuration);
-    setTrim([0, Math.min(nextDuration, 60)]);
+    if (openedProjectRef.current !== projectId) setSingleClip(0, Math.min(nextDuration, 60));
     setEditorPlayhead(0);
+  }
+
+  function setSingleClip(start: number, end: number) {
+    const nextStart = Math.max(0, Math.min(start, Math.max(0, end - 2)));
+    const nextEnd = Math.max(nextStart + Math.min(2, Math.max(0, end - nextStart)), end);
+    const clip: Clip = { id: 'clip-1', start: Math.round(nextStart * 10) / 10, end: Math.round(nextEnd * 10) / 10 };
+    setClips([clip]);
+    setActiveClipId(clip.id);
+    setTrim([clip.start, clip.end]);
+  }
+
+  function invalidatePreparedCues() {
+    if (!analyzed && !segments.length && assembly === 'idle') return;
+    setAnalyzed(false);
+    setSegments([]);
+    setTranscriptionMode(null);
+    setAssembly('idle');
+    setResultUrl('');
   }
 
   function handleTrim(next: number | readonly number[]) {
@@ -407,14 +494,23 @@ export default function Home() {
     const [firstValue = 0, secondValue = Math.min(duration, 60)] = values;
     let start = Math.min(firstValue, secondValue);
     let end = Math.max(firstValue, secondValue);
-    start = Math.max(0, Math.min(duration, Number.isFinite(start) ? start : 0));
-    end = Math.max(0, Math.min(duration, Number.isFinite(end) ? end : Math.min(duration, 60)));
-    if (end - start > 240) end = start + 240;
-    if (duration >= 2 && end - start < 2) {
-      end = Math.min(duration, start + 2);
-      start = Math.max(0, end - 2);
+    const sorted = [...clips].sort((left, right) => left.start - right.start);
+    const activeIndex = sorted.findIndex((clip) => clip.id === activeClipId);
+    const before = activeIndex > 0 ? sorted[activeIndex - 1].end : 0;
+    const after = activeIndex >= 0 && activeIndex < sorted.length - 1 ? sorted[activeIndex + 1].start : duration;
+    const usedByOtherClips = sorted.filter((clip) => clip.id !== activeClipId).reduce((total, clip) => total + clip.end - clip.start, 0);
+    const allowedLength = Math.max(2, Math.min(maxSelectedSeconds - usedByOtherClips, after - before));
+    start = Math.max(before, Math.min(after, Number.isFinite(start) ? start : before));
+    end = Math.max(before, Math.min(after, Number.isFinite(end) ? end : Math.min(after, before + 2)));
+    if (end - start > allowedLength) end = start + allowedLength;
+    if (end - start < 2 && after - before >= 2) {
+      end = Math.min(after, start + 2);
+      start = Math.max(before, end - 2);
     }
-    setTrim([Math.round(start * 10) / 10, Math.round(end * 10) / 10]);
+    const nextTrim: [number, number] = [Math.round(start * 10) / 10, Math.round(end * 10) / 10];
+    setTrim(nextTrim);
+    setClips((items) => items.map((clip) => clip.id === activeClipId ? { ...clip, start: nextTrim[0], end: nextTrim[1] } : clip).sort((left, right) => left.start - right.start));
+    invalidatePreparedCues();
   }
 
   function setTrimBoundary(boundary: 'start' | 'end', value: number) {
@@ -433,11 +529,87 @@ export default function Home() {
     }
   }
 
-  function seekFromTimeline(event: React.PointerEvent<HTMLButtonElement>) {
-    if (!sourceReady || !timelineRef.current) return;
-    const bounds = timelineRef.current.getBoundingClientRect();
+  function selectClip(id: string, shouldSeek = true) {
+    const selected = clips.find((clip) => clip.id === id);
+    if (!selected) return;
+    setActiveClipId(id);
+    setTrim([selected.start, selected.end]);
+    if (shouldSeek) seekEditor(selected.start);
+  }
+
+  function timelineTime(event: React.PointerEvent<HTMLButtonElement>) {
+    const bounds = timelineRef.current?.getBoundingClientRect();
+    if (!bounds) return 0;
     const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width)));
-    seekEditor(ratio * duration);
+    return ratio * duration;
+  }
+
+  function handleTimelinePointerDown(event: React.PointerEvent<HTMLButtonElement>) {
+    if (!sourceReady || !timelineRef.current) return;
+    const time = timelineTime(event);
+    const selectedAtPoint = clips.find((clip) => time >= clip.start && time <= clip.end);
+    if (selectedAtPoint && selectedAtPoint.id !== activeClipId) {
+      selectClip(selectedAtPoint.id, false);
+      seekEditor(time);
+      return;
+    }
+    const bounds = timelineRef.current.getBoundingClientRect();
+    const grabDistance = Math.max(.7, duration / Math.max(1, bounds.width) * 14);
+    if (Math.abs(time - trim[0]) <= grabDistance) timelineDragRef.current = 'start';
+    else if (Math.abs(time - trim[1]) <= grabDistance) timelineDragRef.current = 'end';
+    if (timelineDragRef.current) {
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      return;
+    }
+    seekEditor(time);
+  }
+
+  function handleTimelinePointerMove(event: React.PointerEvent<HTMLButtonElement>) {
+    const edge = timelineDragRef.current;
+    if (!edge) return;
+    event.preventDefault();
+    handleTrim(edge === 'start' ? [timelineTime(event), trim[1]] : [trim[0], timelineTime(event)]);
+  }
+
+  function handleTimelinePointerUp(event: React.PointerEvent<HTMLButtonElement>) {
+    if (!timelineDragRef.current) return;
+    timelineDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
+  function addClip() {
+    const selectedSeconds = clips.reduce((total, clip) => total + clip.end - clip.start, 0);
+    const remainingSeconds = maxSelectedSeconds - selectedSeconds;
+    if (clips.length >= maxSelectedClips) { setMessage(`Можно выбрать до ${maxSelectedClips} фрагментов в одном ролике.`); return; }
+    if (remainingSeconds < 2) { setMessage('Достигнут общий лимит — до 4 минут выбранных фрагментов.'); return; }
+    const sorted = [...clips].sort((left, right) => left.start - right.start);
+    const gaps = [
+      { start: 0, end: sorted[0]?.start ?? duration },
+      ...sorted.slice(0, -1).map((clip, index) => ({ start: clip.end, end: sorted[index + 1].start })),
+      { start: sorted.at(-1)?.end ?? 0, end: duration },
+    ].filter((gap) => gap.end - gap.start >= 2);
+    if (!gaps.length) { setMessage('В этом видео не осталось места для отдельного фрагмента длиной от 2 секунд.'); return; }
+    const gap = [...gaps].sort((left, right) => Math.abs((left.start + left.end) / 2 - editorPlayhead) - Math.abs((right.start + right.end) / 2 - editorPlayhead))[0];
+    const clipDuration = Math.min(12, remainingSeconds, gap.end - gap.start);
+    const start = Math.max(gap.start, Math.min(gap.end - clipDuration, editorPlayhead - clipDuration / 2));
+    const newClip: Clip = { id: `clip-${Date.now()}`, start: Math.round(start * 10) / 10, end: Math.round((start + clipDuration) * 10) / 10 };
+    setClips((items) => [...items, newClip].sort((left, right) => left.start - right.start));
+    setActiveClipId(newClip.id);
+    setTrim([newClip.start, newClip.end]);
+    seekEditor(newClip.start);
+    invalidatePreparedCues();
+  }
+
+  function removeClip(id: string) {
+    if (clips.length === 1) { setMessage('Нужен хотя бы один фрагмент. Измените его границы или выберите другое место.'); return; }
+    const nextClips = clips.filter((clip) => clip.id !== id);
+    const nextActive = nextClips.find((clip) => clip.start >= (clips.find((clip) => clip.id === id)?.start ?? 0)) ?? nextClips.at(-1)!;
+    setClips(nextClips);
+    setActiveClipId(nextActive.id);
+    setTrim([nextActive.start, nextActive.end]);
+    seekEditor(nextActive.start);
+    invalidatePreparedCues();
   }
 
   async function analyzeClip() {
@@ -446,14 +618,18 @@ export default function Home() {
     setMessage('Отделяем речь, распознаём текст и ищем паузы…');
     if (projectId) {
       try {
-        const result = await apiFetch<{ segments: Segment[]; transcriptionMode: 'transcribed' | 'manual'; transcriptionReason?: 'no_speech' | 'unavailable' | null }>(`/projects/${projectId}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start: trim[0], end: trim[1] }) });
+        const result = await apiFetch<{ segments: Segment[]; transcriptionMode: 'transcribed' | 'manual'; transcriptionReason?: 'no_speech' | 'unavailable' | null }>(`/projects/${projectId}/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clips: clips.map((clip) => ({ id: clip.id, start: clip.start, end: clip.end })) }),
+        });
         setSegments(result.segments);
         setActiveSegment(result.segments[0]?.id || 1);
         setTranscriptionMode(result.transcriptionMode);
         setAnalyzing(false);
         setAnalyzed(true);
         setMessage(result.transcriptionMode === 'transcribed'
-          ? `Deepgram распознал речь: ${result.segments.length} смысловых фраз. Предложения сохранены целиком — проверьте текст перед записью.`
+          ? `Deepgram распознал речь: ${result.segments.length} смысловых фраз в ${clips.length} фрагм. Предложения сохранены целиком — проверьте текст перед записью.`
           : result.transcriptionReason === 'no_speech'
             ? `В этом фрагменте не нашлось распознаваемой речи. Создано ${result.segments.length} окон по 2–4 секунды — впишите сценарий вручную.`
             : `Создано ${result.segments.length} таймированных окон по 2–4 секунды. Автосубтитры недоступны — впишите сценарий вручную.`);
@@ -825,10 +1001,35 @@ export default function Home() {
     const tailOut = recording === segment.id && session?.segmentId === segment.id
       ? session.tailOut
       : recordingWindow(segment).tailOut;
-    if (preview.currentTime < segment.end + tailOut - 0.03) return;
+    const sourceClip = clips.find((clip) => clip.id === segment.clipId)
+      ?? clips.find((clip) => segment.start >= clip.start - .01 && segment.end <= clip.end + .01)
+      ?? { end: trim[1] };
+    if (preview.currentTime < Math.min(sourceClip.end, segment.end + tailOut) - 0.03) return;
     if (recording === segment.id) preview.pause();
     else if (playback?.kind === 'original') stopPlayback();
   }
+
+  function handleSegmentVideoSeeking() {
+    const preview = segmentVideoRef.current;
+    const segment = segments.find((item) => item.id === activeSegment);
+    if (!preview || !segment) return;
+    const previewWindow = recordingWindow(segment);
+    if (preview.currentTime < previewWindow.start - .05 || preview.currentTime > previewWindow.end + .05) preview.currentTime = previewWindow.start;
+  }
+
+  useEffect(() => {
+    if (!analyzed) return;
+    const segment = segments.find((item) => item.id === activeSegment);
+    if (!segment) return;
+    const timer = window.setTimeout(() => {
+      const preview = segmentVideoRef.current;
+      if (!preview || recorderRef.current?.state === 'recording') return;
+      preview.pause();
+      preview.currentTime = recordingWindow(segment).start;
+      preview.muted = true;
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [activeSegment, analyzed, clips, segments]);
 
   function setOriginal(id: number) {
     setSegments((items) => items.map((item) => item.id === id ? { ...item, state: item.state === 'original' ? 'pending' : 'original' } : item));
@@ -843,7 +1044,7 @@ export default function Home() {
     if (!projectId) { setMessage('Для настоящего MP4-рендера откройте локальное приложение и загрузите видео заново.'); return; }
     setAssembly('processing');
     setAssemblyProgress(1);
-    setMessage('Собираем дорожки, нормализуем голос и возвращаем музыку…');
+    setMessage('Склеиваем фрагменты, очищаем голос и подавляем исходную речь…');
     try {
       await apiFetch<{ ok: boolean }>(`/projects/${projectId}/render`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ segments: segments.map(({ id, text }) => ({ id, text })), burnSubtitles }) });
       for (let attempt = 0; attempt < 900; attempt += 1) {
@@ -855,7 +1056,7 @@ export default function Home() {
           setResultUrl(mediaUrl(status.outputUrl));
           setCredits(status.credits);
           window.localStorage.setItem('dublika-credits', String(status.credits));
-          setMessage('Готово: голос очищен, оригинал приглушён под репликами, MP4 собран.');
+          setMessage('Готово: фрагменты склеены, голос очищен, исходная речь подавлена, MP4 собран.');
           return;
         }
         if (status.status === 'failed') throw new Error(status.error || 'Не удалось собрать видео');
@@ -974,7 +1175,7 @@ export default function Home() {
 
             <section className={`surface editor-card ${!sourceReady ? 'is-muted' : ''}`}>
               <div className="section-header">
-                <div><span className="section-index">02</span><div><h2>Выберите отрывок</h2><p>До 4 минут — этого хватит для сцены или ролика</p></div></div>
+                <div><span className="section-index">02</span><div><h2>Выберите фрагменты</h2><p>До 4 минут суммарно — можно собрать сцену из нескольких моментов</p></div></div>
                 <span className="duration-chip"><Clock3 size={14} /> {formatTime(clipLength)}</span>
               </div>
               <div className="video-stage">
@@ -987,14 +1188,18 @@ export default function Home() {
                 <div className="stage-topline"><span><FileVideo size={14} /> {sourceReady ? sourceName : 'Видео не выбрано'}</span><button aria-label="Действия с видео"><MoreHorizontal size={18} /></button></div>
               </div>
               <div className="timeline">
-                <div className="timeline-toolbar"><span>{formatTime(trim[0])}</span><div><Scissors size={15} /> Выбранный фрагмент</div><span>{formatTime(trim[1])}</span></div>
-                <button ref={timelineRef} className="filmstrip" type="button" disabled={!sourceReady} onPointerDown={seekFromTimeline} onKeyDown={(event) => {
+                <div className="timeline-toolbar"><span>{formatTime(trim[0])}</span><div><Scissors size={15} /> Фрагмент {Math.max(1, clips.findIndex((clip) => clip.id === activeClipId) + 1)} из {clips.length}</div><span>{formatTime(trim[1])}</span></div>
+                <button ref={timelineRef} className="filmstrip" type="button" disabled={!sourceReady} onPointerDown={handleTimelinePointerDown} onPointerMove={handleTimelinePointerMove} onPointerUp={handleTimelinePointerUp} onPointerCancel={handleTimelinePointerUp} onKeyDown={(event) => {
                   if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
                   event.preventDefault();
                   seekEditor(editorPlayhead + (event.key === 'ArrowRight' ? 1 : -1));
-                }} aria-label={`Текущая позиция ${formatTime(editorPlayhead)}. Нажмите по ленте, чтобы перейти к моменту видео.`}>
+                }} aria-label={`Текущая позиция ${formatTime(editorPlayhead)}. Тяните светлые границы активного фрагмента или нажмите по ленте, чтобы перейти к моменту видео.`}>
                   {timelineBlocks.map((block) => <span key={block.id} style={{ '--hue': block.hue, '--light': `${block.lightness}%` } as React.CSSProperties} />)}
-                  <span className="selection-box" style={{ left: `${selectionStart}%`, right: `${100 - selectionEnd}%` }} aria-hidden="true" />
+                  {clips.map((clip) => {
+                    const start = Math.min(100, Math.max(0, clip.start / Math.max(duration, 1) * 100));
+                    const end = Math.min(100, Math.max(start, clip.end / Math.max(duration, 1) * 100));
+                    return <span className={`selection-box ${clip.id === activeClipId ? 'is-active' : 'is-idle'}`} style={{ left: `${start}%`, right: `${100 - end}%` }} key={clip.id} aria-hidden="true" />;
+                  })}
                   <span className="timeline-playhead" style={{ left: `${playheadPosition}%` }} aria-hidden="true" />
                 </button>
                 <div className="waveform" aria-label={editorLevels.length === 96 ? 'Форма волны выбранного отрывка' : 'Форма волны будет построена после загрузки видео'}>{editorWaveform.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
@@ -1003,7 +1208,15 @@ export default function Home() {
                 <div className="timeline-inputs">
                   <label><span>Начало</span><input type="number" min={0} max={Math.max(0, trim[1] - 2)} step="0.1" value={trim[0].toFixed(1)} disabled={!sourceReady} onChange={(event) => setTrimBoundary('start', Number(event.target.value))} /><button type="button" onClick={() => seekEditor(trim[0])} disabled={!sourceReady}>К началу</button></label>
                   <label><span>Конец</span><input type="number" min={Math.min(duration, trim[0] + 2)} max={duration} step="0.1" value={trim[1].toFixed(1)} disabled={!sourceReady} onChange={(event) => setTrimBoundary('end', Number(event.target.value))} /><button type="button" onClick={() => seekEditor(trim[1])} disabled={!sourceReady}>К концу</button></label>
-                  <button className="timeline-reset" type="button" disabled={!sourceReady} onClick={() => { handleTrim([0, Math.min(duration, 60)]); seekEditor(0); }}>Сбросить отрывок</button>
+                  <button className="timeline-reset" type="button" disabled={!sourceReady} onClick={() => { setSingleClip(0, Math.min(duration, 60)); seekEditor(0); invalidatePreparedCues(); }}>Оставить один</button>
+                </div>
+                <div className="clip-picker" aria-label="Выбранные фрагменты">
+                  <div className="clip-picker-head"><span><Scissors /> Выбрано {clips.length} из {maxSelectedClips}</span><small>{formatTime(clipLength)} / 4:00</small></div>
+                  <div className="clip-picker-list">
+                    {clips.map((clip, index) => <div className={`clip-chip ${clip.id === activeClipId ? 'is-active' : ''}`} key={clip.id}><button type="button" onClick={() => selectClip(clip.id)}><strong>Фрагмент {index + 1}</strong><span>{formatTime(clip.start)} — {formatTime(clip.end)}</span></button><button className="clip-remove" type="button" onClick={() => removeClip(clip.id)} aria-label={`Удалить фрагмент ${index + 1}`} disabled={clips.length === 1}>×</button></div>)}
+                    <button className="add-clip" type="button" onClick={addClip} disabled={!sourceReady || clips.length >= maxSelectedClips || clipLength >= maxSelectedSeconds}><Plus /> Добавить в позиции {formatTime(editorPlayhead)}</button>
+                  </div>
+                  <p>Тяните светлые границы прямо на ленте. Фрагменты не пересекутся, а итоговый MP4 склеит их в указанном порядке.</p>
                 </div>
               </div>
               <div className="editor-footer">
@@ -1015,12 +1228,13 @@ export default function Home() {
             {analyzed && (
               <section className="surface dub-console-card">
                 <div className="section-header dub-console-header"><div><span className="section-index">03</span><div><h2>Запишите реплики</h2><p>{transcriptionMode === 'transcribed' ? 'Текст получен от Deepgram. Предложения сохраняем целиком, без обрыва слов.' : 'Таймированные окна по 2–4 секунды. Введите сценарий перед записью.'}</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
-                <div className="dub-console-toolbar"><button type="button" onClick={previousSegment} aria-label="Предыдущая реплика">←</button><span>Реплика <strong>{activeSegment}</strong> / {segments.length}</span><button type="button" onClick={nextSegment} aria-label="Следующая реплика">→</button></div>
+                <div className="segment-navigator" aria-label="Выбор реплики"><div className="segment-navigator-title"><span>Реплики</span><small>выбирайте и записывайте в любом порядке</small></div><div className="segment-navigator-track">{segments.map((item) => <button className={activeSegment === item.id ? 'is-active' : item.state !== 'pending' ? 'is-complete' : ''} type="button" key={item.id} onClick={() => selectSegment(item.id)} title={item.text || `Реплика ${item.id}`}><span>{item.state === 'ready' ? <Check size={13} /> : item.state === 'original' ? <Volume2 size={13} /> : item.id}</span><strong>Реплика {item.id} · {formatTime(item.start)}</strong><small>{item.text || 'Введите текст реплики'}</small></button>)}</div></div>
                 <div className="dub-console">
                   <div className="dub-workbench">
                     <div className="segment-video-wrap">
-                      <video ref={segmentVideoRef} src={videoUrl} playsInline controls onPlay={handleSegmentVideoPlay} onPause={handleSegmentVideoPause} onTimeUpdate={handleSegmentVideoTimeUpdate}><track kind="captions" label="Русские субтитры" srcLang="ru" /></video>
+                      <video ref={segmentVideoRef} src={videoUrl} playsInline preload="auto" onPlay={handleSegmentVideoPlay} onPause={handleSegmentVideoPause} onSeeking={handleSegmentVideoSeeking} onTimeUpdate={handleSegmentVideoTimeUpdate}><track kind="captions" label="Русские субтитры" srcLang="ru" /></video>
                       <div className="segment-video-badge"><ListVideo /> {formatTime(activeLine.start)} — {formatTime(activeLine.end)} <i>+{formatTime(activeRecordingWindow.leadIn)} / +{formatTime(activeRecordingWindow.tailOut)}</i></div>
+                      <button className="segment-preview-toggle" type="button" onClick={replayOriginal} disabled={recording !== null || countdown !== null}>{originalIsPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}<span>{originalIsPlaying ? 'Остановить' : 'Посмотреть фрагмент'}</span></button>
                       {countdown !== null && <div className="record-countdown"><span>{countdown}</span><small>приготовьтесь</small></div>}
                       {recording === activeSegment && <div className={`live-transcript-overlay ${transcriptionState !== 'listening' ? 'is-muted' : ''}`}><Captions /><span>{liveTranscript || (transcriptionState === 'unsupported' ? 'Живая транскрипция недоступна в этом браузере' : transcriptionState === 'error' ? 'Не удалось распознать речь — текст можно ввести ниже' : 'Говорите — субтитры появятся здесь…')}</span></div>}
                     </div>

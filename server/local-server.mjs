@@ -279,8 +279,9 @@ async function waveformForRange(project, start, end) {
 async function waveformForSegment(project, segment) {
   const cached = project.waveforms?.[segment.id];
   if (Array.isArray(cached) && cached.length === 96) return cached;
-  const waveformStart = Math.max(project.trim?.start ?? 0, segment.start - recordingLeadSeconds);
-  const waveformEnd = Math.min(project.trim?.end ?? segment.end, segment.end + recordingTailSeconds);
+  const sourceClip = segmentClip(project, segment);
+  const waveformStart = Math.max(sourceClip.start, segment.start - recordingLeadSeconds);
+  const waveformEnd = Math.min(sourceClip.end, segment.end + recordingTailSeconds);
   const levels = await waveformForRange(project, waveformStart, waveformEnd);
   project.waveforms ??= {};
   project.waveforms[segment.id] = levels;
@@ -439,13 +440,28 @@ function srtTime(value) {
 function writeSubtitles(project) {
   const subtitlePath = join(dataDir, `${project.id}.srt`);
   const contents = project.segments.map((segment, index) => {
-    const start = segment.start - project.trim.start;
-    const end = segment.end - project.trim.start;
+    const start = Number.isFinite(segment.outputStart) ? segment.outputStart : segment.start - project.trim.start;
+    const end = Number.isFinite(segment.outputEnd) ? segment.outputEnd : segment.end - project.trim.start;
     const text = String(segment.text || '').replace(/[\r\n]+/g, ' ').trim();
     return `${index + 1}\n${srtTime(start)} --> ${srtTime(end)}\n${text}\n`;
   }).join('\n');
   writeFileSync(subtitlePath, contents, 'utf8');
   return subtitlePath;
+}
+
+function projectClips(project) {
+  const incoming = Array.isArray(project.clips) && project.clips.length ? project.clips : project.trim ? [{ id: 'clip-1', ...project.trim }] : [];
+  return incoming
+    .map((clip, index) => ({ id: String(clip.id || `clip-${index + 1}`).slice(0, 40), start: Number(clip.start), end: Number(clip.end) }))
+    .filter((clip) => Number.isFinite(clip.start) && Number.isFinite(clip.end) && clip.end - clip.start >= minSegmentSeconds)
+    .sort((left, right) => left.start - right.start);
+}
+
+function segmentClip(project, segment) {
+  const clips = projectClips(project);
+  return clips.find((clip) => clip.id === segment.clipId)
+    ?? clips.find((clip) => segment.start >= clip.start - .01 && segment.end <= clip.end + .01)
+    ?? { start: project.trim?.start ?? segment.start, end: project.trim?.end ?? segment.end };
 }
 
 function deepgramKeyState() {
@@ -509,65 +525,115 @@ function projectFor(request, id) {
 }
 
 async function analyzeProject(project, body) {
-  const start = Math.max(0, Number(body.start) || 0);
-  const end = Math.min(start + 240, Number(body.end) || start + 30);
-  if (!(end - start >= minSegmentSeconds)) throw new Error('Выберите отрывок не короче 2 секунд');
-  project.trim = { start, end };
-  let segments = await transcribeWithDeepgram(project.inputPath, start, end);
-  let transcriptionMode = 'transcribed';
-  let transcriptionReason = null;
-  if (!segments?.length) {
-    transcriptionMode = 'manual';
-    transcriptionReason = deepgramKeyState().valid ? 'no_speech' : 'unavailable';
-    let log = '';
-    try { log = await runFfmpeg(['-hide_banner', '-ss', String(start), '-t', String(end - start), '-i', project.inputPath, '-vn', '-af', 'silencedetect=noise=-32dB:d=0.32', '-f', 'null', '-']); } catch (error) { log = String(error.message || ''); }
-    segments = manualSegments(start, end, log);
+  const rawClips = Array.isArray(body.clips) && body.clips.length ? body.clips : [{ id: 'clip-1', start: body.start, end: body.end }];
+  if (rawClips.length > 6) throw new Error('Можно выбрать не больше 6 фрагментов');
+  const clips = rawClips.map((clip, index) => {
+    const start = Math.max(0, Number(clip.start) || 0);
+    const end = Number(clip.end);
+    return { id: String(clip.id || `clip-${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || `clip-${index + 1}`, start: rounded(start), end: rounded(end) };
+  }).sort((left, right) => left.start - right.start);
+  if (clips.some((clip) => !(clip.end - clip.start >= minSegmentSeconds) || clip.end - clip.start > maxSelectedSeconds)) throw new Error('Каждый фрагмент должен быть от 2 секунд до 4 минут');
+  if (clips.some((clip, index) => index > 0 && clip.start < clips[index - 1].end)) throw new Error('Выбранные фрагменты не должны пересекаться');
+  const totalDuration = clips.reduce((total, clip) => total + clip.end - clip.start, 0);
+  if (totalDuration > maxSelectedSeconds) throw new Error('Суммарная длительность фрагментов не может быть больше 4 минут');
+
+  project.clips = clips;
+  project.trim = { start: clips[0].start, end: clips.at(-1).end };
+  const collected = [];
+  let outputOffset = 0;
+  let allTranscribed = true;
+  let onlyNoSpeech = true;
+  for (const clip of clips) {
+    let segments = await transcribeWithDeepgram(project.inputPath, clip.start, clip.end);
+    if (!segments?.length) {
+      allTranscribed = false;
+      onlyNoSpeech &&= deepgramKeyState().valid;
+      let log = '';
+      try { log = await runFfmpeg(['-hide_banner', '-ss', String(clip.start), '-t', String(clip.end - clip.start), '-i', project.inputPath, '-vn', '-af', 'silencedetect=noise=-32dB:d=0.32', '-f', 'null', '-']); } catch (error) { log = String(error.message || ''); }
+      segments = manualSegments(clip.start, clip.end, log);
+    } else onlyNoSpeech = false;
+    for (const segment of segments) {
+      const start = rounded(segment.start);
+      const end = rounded(segment.end);
+      collected.push({
+        id: collected.length + 1,
+        clipId: clip.id,
+        start,
+        end,
+        outputStart: rounded(outputOffset + start - clip.start),
+        outputEnd: rounded(outputOffset + end - clip.start),
+        text: String(segment.text || ''),
+        state: 'pending',
+      });
+    }
+    outputOffset += clip.end - clip.start;
   }
-  project.segments = segments.map((item, index) => ({ id: index + 1, start: rounded(item.start), end: rounded(item.end), text: String(item.text || ''), state: 'pending' }));
+  project.segments = collected;
+  const transcriptionMode = allTranscribed ? 'transcribed' : 'manual';
+  const transcriptionReason = allTranscribed ? null : onlyNoSpeech ? 'no_speech' : 'unavailable';
   project.transcriptionMode = transcriptionMode;
   project.waveforms = {};
   project.status = 'ready';
   project.updatedAt = new Date().toISOString();
   saveState();
-  return { segments: project.segments, transcriptionMode, transcriptionReason };
+  return { segments: project.segments, clips, transcriptionMode, transcriptionReason };
 }
 
 async function renderProject(user, project, burnSubtitles = true) {
   if (user.credits <= 0 && user.plan === 'Пробный') throw new Error('Бесплатные обработки закончились');
   const recorded = project.segments.filter((segment) => project.recordings?.[segment.id]);
   if (!recorded.length) throw new Error('Запишите хотя бы одну реплику');
-  const duration = project.trim.end - project.trim.start;
+  const clips = projectClips(project);
+  if (!clips.length) throw new Error('Сначала выберите хотя бы один фрагмент');
+  const duration = clips.reduce((total, clip) => total + clip.end - clip.start, 0);
   const outputPath = join(outputDir, `${project.id}.mp4`);
-  const args = ['-y', '-ss', String(project.trim.start), '-t', String(duration), '-i', project.inputPath];
+  const args = ['-y'];
+  clips.forEach((clip) => args.push('-ss', String(clip.start), '-t', String(clip.end - clip.start), '-i', project.inputPath));
   recorded.forEach((segment) => args.push('-i', project.recordings[segment.id].path));
   const filters = [];
+  const sourceHasSound = await sourceHasAudio(project.inputPath);
+  const sourceVideoLabels = clips.map((_, index) => `[${index}:v]setpts=PTS-STARTPTS[v${index}]`);
+  filters.push(...sourceVideoLabels);
+  let sourceVideoLabel;
+  if (sourceHasSound) {
+    clips.forEach((_, index) => filters.push(`[${index}:a]asetpts=PTS-STARTPTS[a${index}]`));
+    const concatInputs = clips.map((_, index) => `[v${index}][a${index}]`).join('');
+    filters.push(`${concatInputs}concat=n=${clips.length}:v=1:a=1[vsource][original]`);
+  } else {
+    filters.push(`${clips.map((_, index) => `[v${index}]`).join('')}concat=n=${clips.length}:v=1:a=0[vsource]`);
+  }
+  sourceVideoLabel = '[vsource]';
   recorded.forEach((segment, index) => {
     const take = project.recordings[segment.id];
     // Recordings made before this feature have no padding metadata and remain
     // sample-aligned. New takes include their one-second lead-in and tail-out.
     const leadIn = Math.min(recordingLeadSeconds, Math.max(0, Number(take.leadIn) || 0));
     const tailOut = Math.min(recordingTailSeconds, Math.max(0, Number(take.tailOut) || 0));
-    const delay = Math.max(0, Math.round((segment.start - project.trim.start) * 1000));
+    const delay = Math.max(0, Math.round((Number.isFinite(segment.outputStart) ? segment.outputStart : segment.start - project.trim.start) * 1000));
     const mixedDuration = Math.max(.25, segment.end - segment.start + tailOut);
     const takeEnd = leadIn + mixedDuration;
-    filters.push(`[${index + 1}:a]highpass=f=80,lowpass=f=12000,afftdn=nf=-24,dynaudnorm=f=150:g=13,loudnorm=I=-16:TP=-1.5:LRA=9,atrim=${leadIn.toFixed(3)}:${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,adelay=${delay}:all=1[t${index}]`);
+    filters.push(`[${clips.length + index}:a]highpass=f=80,lowpass=f=12000,afftdn=nf=-24,dynaudnorm=f=150:g=13,loudnorm=I=-16:TP=-1.5:LRA=9,atrim=${leadIn.toFixed(3)}:${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,adelay=${delay}:all=1[t${index}]`);
   });
   const takeLabels = recorded.map((_, index) => `[t${index}]`).join('');
   filters.push(`${takeLabels}amix=inputs=${recorded.length}:normalize=0,alimiter=limit=.9[voice]`);
-  if (await sourceHasAudio(project.inputPath)) {
-    filters.push(`[0:a]asetpts=PTS-STARTPTS[original]`);
+  if (sourceHasSound) {
+    // Most dialogue in typical social clips is centred.  Reducing the mid
+    // channel retains a large part of stereo music/effects while suppressing
+    // the original spoken voice before the new take is mixed in.
+    filters.push('[original]aformat=channel_layouts=stereo,stereotools=mlev=0.04[effects]');
     filters.push('[voice]asplit=2[voice_sc][voice_mix]');
-    filters.push('[original][voice_sc]sidechaincompress=threshold=.018:ratio=12:attack=8:release=300[ducked]');
+    filters.push('[effects][voice_sc]sidechaincompress=threshold=.018:ratio=14:attack=7:release=260[ducked]');
     filters.push("[ducked][voice_mix]amix=inputs=2:normalize=0:weights='0.9 1.15',alimiter=limit=.95[aout]");
   } else {
     filters.push('[voice]anull[aout]');
   }
-  args.push('-filter_complex', filters.join(';'));
   if (burnSubtitles) {
     const subtitlePath = writeSubtitles(project).replace(/\\/g, '/').replace(':', '\\:').replace(/'/g, "\\'");
-    args.push('-vf', `subtitles=filename='${subtitlePath}':force_style='FontName=Arial,FontSize=19,PrimaryColour=&H00FFFFFF,OutlineColour=&H90000000,BorderStyle=3,Outline=1,Shadow=0,MarginV=34,Alignment=2'`);
+    filters.push(`${sourceVideoLabel}subtitles=filename='${subtitlePath}':force_style='FontName=Arial,FontSize=19,PrimaryColour=&H00FFFFFF,OutlineColour=&H90000000,BorderStyle=3,Outline=1,Shadow=0,MarginV=34,Alignment=2'[vout]`);
+    sourceVideoLabel = '[vout]';
   }
-  args.push('-map', '0:v:0', '-map', '[aout]', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-c:a', 'aac', '-ar', '48000', '-b:a', '192k', '-t', String(duration), '-movflags', '+faststart', '-progress', 'pipe:2', '-nostats', outputPath);
+  args.push('-filter_complex', filters.join(';'));
+  args.push('-map', sourceVideoLabel, '-map', '[aout]', '-c:v', 'libx264', '-preset', 'superfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-b:a', '160k', '-t', String(duration), '-movflags', '+faststart', '-max_muxing_queue_size', '2048', '-progress', 'pipe:2', '-nostats', outputPath);
   project.status = 'processing';
   project.progress = 1;
   project.error = null;
@@ -675,7 +741,11 @@ async function handleApi(request, response, url) {
 
   if (pathname === '/api/projects' && request.method === 'GET') {
     const user = actor(request);
-    const projects = Object.values(state.projects).filter((project) => project.userId === user.id).map(({ inputPath: _input, outputPath: _output, recordings: _recordings, ...project }) => project);
+    const projects = Object.values(state.projects).filter((project) => project.userId === user.id).map(({ inputPath: _input, outputPath: _output, recordings: _recordings, ...project }) => ({
+      ...project,
+      inputUrl: `/media/projects/${project.id}/source`,
+      outputUrl: project.outputUrl || null,
+    }));
     return sendJson(response, 200, { projects, credits: user.credits, plan: user.plan });
   }
 
@@ -698,7 +768,11 @@ async function handleApi(request, response, url) {
   const segmentId = Number(projectMatch[3]);
   const wantsWaveform = Boolean(projectMatch[4]);
 
-  if (!action && !Number.isFinite(segmentId) && request.method === 'GET') return sendJson(response, 200, { project: { ...project, inputPath: undefined, outputPath: undefined }, credits: user.credits });
+  if (!action && !Number.isFinite(segmentId) && request.method === 'GET') {
+    const { inputPath: _input, outputPath: _output, recordings, ...safeProject } = project;
+    const segments = project.segments.map((segment) => recordings?.[segment.id] ? { ...segment, audioUrl: `/media/projects/${project.id}/takes/${segment.id}` } : segment);
+    return sendJson(response, 200, { project: { ...safeProject, segments, inputUrl: `/media/projects/${project.id}/source`, outputUrl: project.outputUrl || null }, credits: user.credits });
+  }
   if (action === 'analyze' && request.method === 'POST') return sendJson(response, 200, await analyzeProject(project, await readJson(request)));
   if (wantsWaveform && request.method === 'GET') {
     const segment = project.segments.find((item) => item.id === segmentId);
