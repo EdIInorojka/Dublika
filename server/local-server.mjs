@@ -602,7 +602,7 @@ async function analyzeProject(project, body) {
   return { segments: project.segments, clips, transcriptionMode, transcriptionReason };
 }
 
-async function renderProject(user, project, burnSubtitles = true) {
+async function renderProject(user, project) {
   if (user.credits <= 0 && user.plan === 'Пробный') throw new Error('Бесплатные обработки закончились');
   const recorded = project.segments.filter((segment) => project.recordings?.[segment.id]);
   if (!recorded.length) throw new Error('Запишите хотя бы одну реплику');
@@ -610,16 +610,21 @@ async function renderProject(user, project, burnSubtitles = true) {
   if (!clips.length) throw new Error('Сначала выберите хотя бы один фрагмент');
   const duration = clips.reduce((total, clip) => total + clip.end - clip.start, 0);
   const outputPath = join(outputDir, `${project.id}.mp4`);
-  const args = ['-y'];
-  clips.forEach((clip) => args.push('-ss', String(clip.start), '-t', String(clip.end - clip.start), '-i', project.inputPath));
+  // Use one source input and exact trim filters. Input-side seeking can begin
+  // at a non-keyframe and was causing clicks/pops where selected pieces met.
+  const args = ['-y', '-i', project.inputPath];
   recorded.forEach((segment) => args.push('-i', project.recordings[segment.id].path));
   const filters = [];
   const sourceHasSound = await sourceHasAudio(project.inputPath);
-  const sourceVideoLabels = clips.map((_, index) => `[${index}:v]setpts=PTS-STARTPTS[v${index}]`);
+  const sourceVideoLabels = clips.map((clip, index) => `[0:v]trim=start=${clip.start}:end=${clip.end},setpts=PTS-STARTPTS[v${index}]`);
   filters.push(...sourceVideoLabels);
   let sourceVideoLabel;
   if (sourceHasSound) {
-    clips.forEach((_, index) => filters.push(`[${index}:a]asetpts=PTS-STARTPTS[a${index}]`));
+    clips.forEach((clip, index) => {
+      const clipDuration = Math.max(.04, clip.end - clip.start);
+      const fadeDuration = Math.min(.025, clipDuration / 2);
+      filters.push(`[0:a]atrim=start=${clip.start}:end=${clip.end},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${fadeDuration},afade=t=out:st=${Math.max(0, clipDuration - fadeDuration)}:d=${fadeDuration}[a${index}]`);
+    });
     const concatInputs = clips.map((_, index) => `[v${index}][a${index}]`).join('');
     filters.push(`${concatInputs}concat=n=${clips.length}:v=1:a=1[vsource][original]`);
   } else {
@@ -635,25 +640,20 @@ async function renderProject(user, project, burnSubtitles = true) {
     const delay = Math.max(0, Math.round((Number.isFinite(segment.outputStart) ? segment.outputStart : segment.start - project.trim.start) * 1000));
     const mixedDuration = Math.max(.25, segment.end - segment.start + tailOut);
     const takeEnd = leadIn + mixedDuration;
-    filters.push(`[${clips.length + index}:a]highpass=f=80,lowpass=f=12000,afftdn=nf=-24,dynaudnorm=f=150:g=13,loudnorm=I=-16:TP=-1.5:LRA=9,atrim=${leadIn.toFixed(3)}:${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,adelay=${delay}:all=1[t${index}]`);
+    filters.push(`[${1 + index}:a]highpass=f=80,lowpass=f=12000,afftdn=nf=-24,dynaudnorm=f=150:g=13,loudnorm=I=-16:TP=-1.5:LRA=9,atrim=${leadIn.toFixed(3)}:${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,adelay=${delay}:all=1[t${index}]`);
   });
   const takeLabels = recorded.map((_, index) => `[t${index}]`).join('');
   filters.push(`${takeLabels}amix=inputs=${recorded.length}:normalize=0,alimiter=limit=.9[voice]`);
   if (sourceHasSound) {
-    // Most dialogue in typical social clips is centred.  Reducing the mid
-    // channel retains a large part of stereo music/effects while suppressing
-    // the original spoken voice before the new take is mixed in.
-    filters.push('[original]aformat=channel_layouts=stereo,stereotools=mlev=0.04[effects]');
+    // Spoken dialogue is usually centred. Mid/side cancellation removes it
+    // much more decisively than simply turning down the mid channel, while
+    // preserving side-panned music and effects in typical stereo footage.
+    filters.push('[original]aformat=channel_layouts=stereo,pan=stereo|c0=0.5*c0-0.5*c1|c1=0.5*c1-0.5*c0,volume=1.25[effects]');
     filters.push('[voice]asplit=2[voice_sc][voice_mix]');
     filters.push('[effects][voice_sc]sidechaincompress=threshold=.018:ratio=14:attack=7:release=260[ducked]');
     filters.push("[ducked][voice_mix]amix=inputs=2:normalize=0:weights='0.9 1.15',alimiter=limit=.95[aout]");
   } else {
     filters.push('[voice]anull[aout]');
-  }
-  if (burnSubtitles) {
-    const subtitlePath = writeSubtitles(project).replace(/\\/g, '/').replace(':', '\\:').replace(/'/g, "\\'");
-    filters.push(`${sourceVideoLabel}subtitles=filename='${subtitlePath}':force_style='FontName=Arial,FontSize=19,PrimaryColour=&H00FFFFFF,OutlineColour=&H90000000,BorderStyle=3,Outline=1,Shadow=0,MarginV=34,Alignment=2'[vout]`);
-    sourceVideoLabel = '[vout]';
   }
   args.push('-filter_complex', filters.join(';'));
   args.push('-map', sourceVideoLabel, '-map', '[aout]', '-c:v', 'libx264', '-preset', 'superfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-b:a', '160k', '-t', String(duration), '-movflags', '+faststart', '-max_muxing_queue_size', '2048', '-progress', 'pipe:2', '-nostats', outputPath);
@@ -827,7 +827,7 @@ async function handleApi(request, response, url) {
         if (segment) segment.text = String(incoming.text || segment.text).slice(0, 500);
       }
     }
-    renderProject(user, project, body.burnSubtitles !== false).catch((error) => { project.status = 'failed'; project.error = String(error.message || error).slice(-1000); saveState(); });
+    renderProject(user, project).catch((error) => { project.status = 'failed'; project.error = String(error.message || error).slice(-1000); saveState(); });
     return sendJson(response, 202, { ok: true, status: 'processing' });
   }
   if (action === 'status' && request.method === 'GET') return sendJson(response, 200, { status: project.status, progress: project.progress || 0, error: project.error || null, outputUrl: project.outputUrl || null, credits: user.credits });

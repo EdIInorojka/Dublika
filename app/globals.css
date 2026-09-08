@@ -505,3 +505,67 @@ h1 em { color: #397c5d; font-style: normal; }
 @media (max-width: 620px) { .final-dub-cta { grid-template-columns: auto 1fr; }.final-dub-cta > button { grid-column: 1 / -1; }.live-transcript-overlay { bottom: 42px; width: 94%; padding: 8px 10px; } }
 @media (max-width: 460px) { .public-footer { grid-template-columns: 1fr; }.hero-video-card { width: 100%; }.voice-pill { display: none; }.record-controls > button { grid-template-columns: 30px 1fr; }.record-controls > button > span { width:30px;height:30px; }.otp-slot { width: 43px !important; height: 52px !important; } }
 @media (max-width: 720px) { .video-library { grid-template-columns: 1fr; }.segment-navigator { align-items: stretch; flex-direction: column; gap: 6px; padding-inline: 15px; }.segment-navigator-track { width: 100%; } }
+
+/* Recording is a focused workstation: one clear route, no auxiliary controls. */
+.record-controls { grid-template-columns: 1.25fr 1fr 1fr; }
+.record-options { grid-template-columns: 1fr; }
+.segment-queue .line-item { grid-template-columns: 28px minmax(0,1fr) auto; cursor: pointer; }
+.segment-queue .line-item.is-locked { opacity: .52; cursor: not-allowed; }
+.segment-queue .line-item.is-locked:hover { border-color: transparent; background: #16221b; box-shadow: none; }
+.segment-queue .line-play { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; background: #24372c; color: #a6baae; }
+.segment-queue .line-play em { display: none; font-family: var(--font-mono); font-size: .58rem; font-style: normal; }
+.queue-state { width: 23px; height: 23px; display: grid; place-items: center; align-self: start; border-radius: 8px; background: #293a31; color: #81958a; }
+.queue-state.is-ready { background: #315b39; color: #c9f6c5; }
+.queue-state.is-next { background: var(--acid); color: #163124; box-shadow: 0 0 0 3px rgba(199,244,92,.1); }
+.queue-state.is-locked { background: #233129; color: #6f8177; }
+
+@media (max-width: 720px) {
+  .studio-app-shell.is-recording-stage .topbar,
+  .studio-app-shell.is-recording-stage .page-heading,
+  .studio-app-shell.is-recording-stage .stepper,
+  .studio-app-shell.is-recording-stage .source-card,
+  .studio-app-shell.is-recording-stage .editor-card,
+  .studio-app-shell.is-recording-stage .workspace-aside { display: none; }
+  .studio-app-shell.is-recording-stage .main-area { width: 100%; min-height: 100dvh; padding: 0; }
+  .studio-app-shell.is-recording-stage .workspace-grid,
+  .studio-app-shell.is-recording-stage .workspace-main { height: 100dvh; min-height: 0; display: block; }
+  .studio-app-shell.is-recording-stage .dub-console-card { height: 100%; display: flex; flex-direction: column; border: 0 !important; border-radius: 0; }
+  .studio-app-shell.is-recording-stage .dub-console-header { flex: 0 0 auto; min-height: 54px; padding: 9px 11px; }
+  .studio-app-shell.is-recording-stage .dub-console-header p { display: none; }
+  .studio-app-shell.is-recording-stage .dub-console-header h2 { font-size: .84rem; }
+  .studio-app-shell.is-recording-stage .dub-console-header .section-index { width: 34px; height: 34px; border-radius: 9px; font-size: .62rem; }
+  .studio-app-shell.is-recording-stage .dub-console-header .duration-chip { padding: 5px 7px; font-size: .58rem; }
+  .studio-app-shell.is-recording-stage .dub-console { flex: 1; min-height: 0; grid-template-columns: minmax(0,1fr) 112px; }
+  .studio-app-shell.is-recording-stage .dub-workbench { min-width: 0; padding: 8px; overflow: hidden; display: flex; flex-direction: column; }
+  .studio-app-shell.is-recording-stage .segment-video-wrap { flex: 0 0 auto; }
+  .studio-app-shell.is-recording-stage .segment-video-wrap video { max-height: 145px; aspect-ratio: 16/8; }
+  .studio-app-shell.is-recording-stage .segment-video-badge { left: 7px; top: 7px; padding: 4px 6px; font-size: .48rem; }
+  .studio-app-shell.is-recording-stage .segment-preview-toggle { bottom: 7px; min-height: 27px; padding: 0 7px; font-size: .5rem; }
+  .studio-app-shell.is-recording-stage .active-caption { gap: 3px; padding: 7px 0 5px; }
+  .studio-app-shell.is-recording-stage .active-caption span { font-size: .48rem; }
+  .studio-app-shell.is-recording-stage .active-caption textarea { min-height: 39px; max-height: 54px; font-size: .72rem; line-height: 1.25; resize: none; }
+  .studio-app-shell.is-recording-stage .wave-compare-head { padding: 4px 0; font-size: .48rem; }
+  .studio-app-shell.is-recording-stage .live-wave-shell { height: 58px; border-radius: 9px; }
+  .studio-app-shell.is-recording-stage .record-limit { margin-top: 5px; padding: 6px 8px; }
+  .studio-app-shell.is-recording-stage .record-limit > div:first-child { font-size: .49rem; }
+  .studio-app-shell.is-recording-stage .record-limit-track { height: 3px; margin-top: 5px; }
+  .studio-app-shell.is-recording-stage .record-controls { margin-top: auto; gap: 5px; padding: 7px 0 0; grid-template-columns: 1.2fr 1fr 1fr; }
+  .studio-app-shell.is-recording-stage .record-controls > button { min-height: 54px; grid-template-columns: 25px 1fr; column-gap: 5px; padding: 6px; border-radius: 9px; }
+  .studio-app-shell.is-recording-stage .record-controls > button > span { width: 25px; height: 25px; border-radius: 7px; }
+  .studio-app-shell.is-recording-stage .record-controls strong { font-size: .55rem; }
+  .studio-app-shell.is-recording-stage .record-controls small { font-size: .43rem; line-height: 1.1; }
+  .studio-app-shell.is-recording-stage .record-options { display: none; }
+  .studio-app-shell.is-recording-stage .segment-queue { max-height: none; min-height: 0; padding: 5px; overflow-y: auto; }
+  .studio-app-shell.is-recording-stage .segment-queue-head { top: -5px; gap: 4px; margin: -5px -5px 2px; padding: 7px 5px 5px; }
+  .studio-app-shell.is-recording-stage .segment-queue-head > div:first-child { font-size: .47rem; }
+  .studio-app-shell.is-recording-stage .segment-queue-slider { padding: 1px; }
+  .studio-app-shell.is-recording-stage .segment-queue-slider [data-slot="slider-thumb"] { width: 12px; height: 12px; border-width: 2px; }
+  .studio-app-shell.is-recording-stage .segment-queue-scale { font-size: .43rem; }
+  .studio-app-shell.is-recording-stage .segment-queue .line-item { grid-template-columns: 1fr; place-items: center; gap: 3px; margin-bottom: 4px; padding: 5px 2px; border-radius: 8px; }
+  .studio-app-shell.is-recording-stage .segment-queue .line-copy { display: none; }
+  .studio-app-shell.is-recording-stage .segment-queue .line-play { width: 24px; height: 24px; background: #294236; }
+  .studio-app-shell.is-recording-stage .segment-queue .line-play svg { display: none; }
+  .studio-app-shell.is-recording-stage .segment-queue .line-play em { display: block; }
+  .studio-app-shell.is-recording-stage .queue-state { width: 17px; height: 17px; border-radius: 6px; }
+  .studio-app-shell.is-recording-stage .queue-state svg { width: 10px; }
+}
