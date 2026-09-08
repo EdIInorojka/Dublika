@@ -54,6 +54,13 @@ import { apiFetch, mediaUrl } from '@/lib/local-api';
 type SourceKind = 'file' | 'link' | 'demo';
 type SegmentState = 'ready' | 'pending' | 'original';
 type PlaybackState = { kind: 'original' | 'take'; segmentId: number } | null;
+type RecordingSession = {
+  segmentId: number;
+  stopReason: 'manual' | 'limit';
+  leadIn: number;
+  tailOut: number;
+  duration: number;
+};
 
 type SpeechRecognitionResultLike = {
   isFinal: boolean;
@@ -89,6 +96,8 @@ type Segment = {
 
 const waveform = [18, 28, 34, 22, 48, 62, 38, 74, 54, 82, 44, 68, 30, 58, 72, 42, 88, 64, 46, 76, 34, 56, 84, 52, 70, 38, 60, 78, 48, 66, 26, 52, 72, 40, 58, 80, 46, 68, 36, 54, 74, 44, 62, 28, 50, 70, 38, 56];
 const demoVideo = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4';
+const recordingLeadSeconds = 1;
+const recordingTailSeconds = 1;
 
 function formatTime(value: number) {
   const minutes = Math.floor(value / 60);
@@ -104,11 +113,12 @@ export default function Home() {
   const liveWaveRef = useRef<HTMLCanvasElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordingChunks = useRef<Blob[]>([]);
-  const recordingSessionRef = useRef<{ segmentId: number; stopReason: 'manual' | 'limit' } | null>(null);
+  const recordingSessionRef = useRef<RecordingSession | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const takeAudioRef = useRef<HTMLAudioElement | null>(null);
   const playbackStopTimeoutRef = useRef<number | null>(null);
+  const previewStartTimeoutRef = useRef<number | null>(null);
   const recordLimitTimeoutRef = useRef<number | null>(null);
   const recordTickRef = useRef<number | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
@@ -163,6 +173,23 @@ export default function Home() {
     () => Array.from({ length: 12 }, (_, index) => ({ id: index, hue: 194 + (index % 4) * 8, lightness: 21 + (index % 3) * 5 })),
     [],
   );
+
+  function recordingWindow(segment: Segment) {
+    const phraseDuration = Math.max(0.35, segment.end - segment.start);
+    // The recorded take always has a one-second count-in and tail. At the
+    // very beginning of a clip the video simply starts at 0 while the take's
+    // count-in is trimmed during final mixing, so the spoken line stays synced.
+    const leadIn = recordingLeadSeconds;
+    const tailOut = recordingTailSeconds;
+    return {
+      leadIn,
+      tailOut,
+      phraseDuration,
+      duration: phraseDuration + leadIn + tailOut,
+      start: Math.max(trim[0], segment.start - leadIn),
+      end: Math.min(trim[1], segment.end + tailOut),
+    };
+  }
 
   useEffect(() => {
     return () => { if (videoUrl.startsWith('blob:')) URL.revokeObjectURL(videoUrl); };
@@ -372,7 +399,7 @@ export default function Home() {
         setAnalyzing(false);
         setAnalyzed(true);
         setMessage(result.transcriptionMode === 'transcribed'
-          ? `Deepgram распознал речь: ${result.segments.length} фраз по 2–4 секунды. Проверьте текст перед записью.`
+          ? `Deepgram распознал речь: ${result.segments.length} смысловых фраз. Предложения сохранены целиком — проверьте текст перед записью.`
           : result.transcriptionReason === 'no_speech'
             ? `В этом фрагменте не нашлось распознаваемой речи. Создано ${result.segments.length} окон по 2–4 секунды — впишите сценарий вручную.`
             : `Создано ${result.segments.length} таймированных окон по 2–4 секунды. Автосубтитры недоступны — впишите сценарий вручную.`);
@@ -519,9 +546,11 @@ export default function Home() {
     if (recordingSessionRef.current) recordingSessionRef.current.stopReason = reason;
     if (recordLimitTimeoutRef.current) window.clearTimeout(recordLimitTimeoutRef.current);
     if (recordTickRef.current) window.clearInterval(recordTickRef.current);
+    if (previewStartTimeoutRef.current) window.clearTimeout(previewStartTimeoutRef.current);
     if (playbackStopTimeoutRef.current) window.clearTimeout(playbackStopTimeoutRef.current);
     recordLimitTimeoutRef.current = null;
     recordTickRef.current = null;
+    previewStartTimeoutRef.current = null;
     playbackStopTimeoutRef.current = null;
     try { recognitionRef.current?.stop(); } catch { /* recognition may already be stopped */ }
     recorderRef.current.stop();
@@ -572,7 +601,16 @@ export default function Home() {
       audioContextRef.current = audioContext;
       latestLevelsRef.current = Array.from({ length: 96 }, () => 0);
       recordingChunks.current = [];
-      const recordingSession: { segmentId: number; stopReason: 'manual' | 'limit' } = { segmentId: id, stopReason: 'manual' };
+      const segment = segments.find((item) => item.id === id);
+      if (!segment) throw new Error('Реплика не найдена');
+      const recordWindow = recordingWindow(segment);
+      const recordingSession: RecordingSession = {
+        segmentId: id,
+        stopReason: 'manual',
+        leadIn: recordWindow.leadIn,
+        tailOut: recordWindow.tailOut,
+        duration: recordWindow.duration,
+      };
       recordingSessionRef.current = recordingSession;
       recorder.ondataavailable = (event) => { if (event.data.size) recordingChunks.current.push(event.data); };
       recorder.onstop = () => {
@@ -593,7 +631,15 @@ export default function Home() {
             ? 'Лимит реплики достигнут — запись остановлена и сохранена.'
             : 'Дубль сохранён. Можно прослушать его или перейти дальше.';
         if (projectId && segmentId !== null) {
-          void apiFetch<{ ok: boolean; takeUrl: string }>(`/projects/${projectId}/segments/${segmentId}`, { method: 'POST', headers: { 'Content-Type': recorder.mimeType || 'audio/webm' }, body: blob })
+          void apiFetch<{ ok: boolean; takeUrl: string }>(`/projects/${projectId}/segments/${segmentId}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': recorder.mimeType || 'audio/webm',
+              'X-Recording-Lead-In': String(recordingSession.leadIn),
+              'X-Recording-Tail-Out': String(recordingSession.tailOut),
+            },
+            body: blob,
+          })
             .then((result) => {
               setSegments((items) => items.map((item) => item.id === segmentId ? { ...item, audioUrl: mediaUrl(result.takeUrl) } : item));
               setBackendOnline(true);
@@ -607,8 +653,7 @@ export default function Home() {
         window.setTimeout(() => drawWaveform(), 0);
       };
       recorderRef.current = recorder;
-      const segment = segments.find((item) => item.id === id);
-      const maximumDuration = Math.max(0.35, (segment?.end || 1) - (segment?.start || 0));
+      const maximumDuration = recordingSession.duration;
       recorder.start(100);
       setRecording(id);
       setRecordElapsed(0);
@@ -620,16 +665,25 @@ export default function Home() {
       startTranscription(id);
       drawWaveform(analyser);
       const preview = segmentVideoRef.current;
-      if (preview && segment) {
-        preview.currentTime = Math.min(segment.start, Math.max(0, (preview.duration || segment.end) - 0.2));
+      if (preview) {
+        preview.currentTime = Math.min(recordWindow.start, Math.max(0, (preview.duration || recordWindow.end) - 0.2));
         preview.muted = !originalMonitor;
         preview.volume = originalMonitor ? 0.34 : 0;
-        void preview.play().catch(() => undefined);
+        const availableLead = Math.max(0, segment.start - recordWindow.start);
+        const virtualLead = Math.max(0, recordWindow.leadIn - availableLead);
+        const playPreview = () => {
+          previewStartTimeoutRef.current = null;
+          if (recorder.state === 'recording') void preview.play().catch(() => undefined);
+        };
+        if (virtualLead > 0) previewStartTimeoutRef.current = window.setTimeout(playPreview, virtualLead * 1000);
+        else playPreview();
       }
-      setMessage(`Идёт запись. Она автоматически завершится через ${formatTime(maximumDuration)}.`);
+      setMessage(`Идёт запись: ${formatTime(recordWindow.leadIn)} до реплики, фраза и ${formatTime(recordWindow.tailOut)} после. Автостоп через ${formatTime(maximumDuration)}.`);
     } catch {
       if (recordLimitTimeoutRef.current) window.clearTimeout(recordLimitTimeoutRef.current);
       if (recordTickRef.current) window.clearInterval(recordTickRef.current);
+      if (previewStartTimeoutRef.current) window.clearTimeout(previewStartTimeoutRef.current);
+      previewStartTimeoutRef.current = null;
       setCountdown(null);
       setMessage('Не получилось включить микрофон. Разрешите доступ в браузере.');
     }
@@ -644,12 +698,13 @@ export default function Home() {
       return;
     }
     stopPlayback();
-    preview.currentTime = Math.min(segment.start, Math.max(0, (preview.duration || segment.end) - 0.2));
+    const previewWindow = recordingWindow(segment);
+    preview.currentTime = Math.min(previewWindow.start, Math.max(0, (preview.duration || previewWindow.end) - 0.2));
     preview.muted = false;
     preview.volume = 0.72;
     setPlayback({ kind: 'original', segmentId: segment.id });
     void preview.play().catch(() => setPlayback(null));
-    playbackStopTimeoutRef.current = window.setTimeout(stopPlayback, Math.max(350, (segment.end - segment.start) * 1000));
+    playbackStopTimeoutRef.current = window.setTimeout(stopPlayback, Math.max(350, (previewWindow.end - previewWindow.start) * 1000));
   }
 
   function selectSegment(id: number) {
@@ -711,8 +766,13 @@ export default function Home() {
   function handleSegmentVideoTimeUpdate() {
     const preview = segmentVideoRef.current;
     const segment = segments.find((item) => item.id === activeSegment);
-    if (!preview || !segment || preview.currentTime < segment.end - 0.03) return;
-    if (recording === segment.id) stopRecording('limit');
+    if (!preview || !segment) return;
+    const session = recordingSessionRef.current;
+    const tailOut = recording === segment.id && session?.segmentId === segment.id
+      ? session.tailOut
+      : recordingWindow(segment).tailOut;
+    if (preview.currentTime < segment.end + tailOut - 0.03) return;
+    if (recording === segment.id) preview.pause();
     else if (playback?.kind === 'original') stopPlayback();
   }
 
@@ -773,8 +833,9 @@ export default function Home() {
   const path = route.split('?')[0].split('#')[0] || '/';
   const activeLine = segments.find((item) => item.id === activeSegment) ?? segments[0];
   const activeSegmentDuration = Math.max(0.35, (activeLine?.end ?? 2) - (activeLine?.start ?? 0));
-  const recordRemaining = Math.max(0, activeSegmentDuration - recordElapsed);
-  const recordProgress = Math.min(100, recordElapsed / activeSegmentDuration * 100);
+  const activeRecordingWindow = activeLine ? recordingWindow(activeLine) : { leadIn: 0, tailOut: 0, phraseDuration: activeSegmentDuration, duration: activeSegmentDuration, start: 0, end: activeSegmentDuration };
+  const recordRemaining = Math.max(0, activeRecordingWindow.duration - recordElapsed);
+  const recordProgress = Math.min(100, recordElapsed / activeRecordingWindow.duration * 100);
   const originalIsPlaying = playback?.kind === 'original' && playback.segmentId === activeSegment;
   const takeIsPlaying = playback?.kind === 'take' && playback.segmentId === activeSegment;
   const pageProps = {
@@ -886,23 +947,23 @@ export default function Home() {
 
             {analyzed && (
               <section className="surface dub-console-card">
-                <div className="section-header dub-console-header"><div><span className="section-index">03</span><div><h2>Запишите реплики</h2><p>{transcriptionMode === 'transcribed' ? 'Текст получен от Deepgram. Каждое окно — 2–4 секунды.' : 'Таймированные окна по 2–4 секунды. Введите сценарий перед записью.'}</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
+                <div className="section-header dub-console-header"><div><span className="section-index">03</span><div><h2>Запишите реплики</h2><p>{transcriptionMode === 'transcribed' ? 'Текст получен от Deepgram. Предложения сохраняем целиком, без обрыва слов.' : 'Таймированные окна по 2–4 секунды. Введите сценарий перед записью.'}</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
                 <div className="dub-console-toolbar"><button type="button" onClick={previousSegment} aria-label="Предыдущая реплика">←</button><span>Реплика <strong>{activeSegment}</strong> / {segments.length}</span><button type="button" onClick={nextSegment} aria-label="Следующая реплика">→</button></div>
                 <div className="dub-console">
                   <div className="dub-workbench">
                     <div className="segment-video-wrap">
                       <video ref={segmentVideoRef} src={videoUrl} playsInline controls onPlay={handleSegmentVideoPlay} onPause={handleSegmentVideoPause} onTimeUpdate={handleSegmentVideoTimeUpdate}><track kind="captions" label="Русские субтитры" srcLang="ru" /></video>
-                      <div className="segment-video-badge"><ListVideo /> {formatTime(activeLine.start)} — {formatTime(activeLine.end)}</div>
+                      <div className="segment-video-badge"><ListVideo /> {formatTime(activeLine.start)} — {formatTime(activeLine.end)} <i>+{formatTime(activeRecordingWindow.leadIn)} / +{formatTime(activeRecordingWindow.tailOut)}</i></div>
                       {countdown !== null && <div className="record-countdown"><span>{countdown}</span><small>приготовьтесь</small></div>}
                       {recording === activeSegment && <div className={`live-transcript-overlay ${transcriptionState !== 'listening' ? 'is-muted' : ''}`}><Captions /><span>{liveTranscript || (transcriptionState === 'unsupported' ? 'Живая транскрипция недоступна в этом браузере' : transcriptionState === 'error' ? 'Не удалось распознать речь — текст можно ввести ниже' : 'Говорите — субтитры появятся здесь…')}</span></div>}
                     </div>
-                    <div className="active-caption"><span>{recording === activeSegment ? 'Живая транскрипция' : transcriptionMode === 'transcribed' ? `Deepgram · реплика ${activeSegment}` : `Сценарий · реплика ${activeSegment}`}</span><input value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} placeholder={transcriptionMode === 'transcribed' ? 'Проверьте текст реплики' : 'Введите текст, который нужно озвучить'} aria-label="Текст активной реплики" /></div>
+                    <div className="active-caption"><span>{recording === activeSegment ? 'Живая транскрипция' : transcriptionMode === 'transcribed' ? `Deepgram · реплика ${activeSegment}` : `Сценарий · реплика ${activeSegment}`}</span><textarea rows={2} value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} placeholder={transcriptionMode === 'transcribed' ? 'Проверьте или вставьте полный текст реплики' : 'Введите или вставьте текст, который нужно озвучить'} aria-label="Текст активной реплики" /></div>
                     <div className="wave-compare-head"><div><span className="legend-original"><i /> Оригинал</span><span className="legend-dub"><i /> Ваш дубль</span></div><span className={recording === activeSegment ? 'live-indicator is-live' : 'live-indicator'}><i /> {recording === activeSegment ? 'микрофон активен' : activeLine.audioUrl ? 'дубль записан' : 'готов к записи'}</span></div>
                     <div className="live-wave-shell"><canvas ref={liveWaveRef} className="live-wave-canvas" aria-label="Сравнение громкости оригинала и живого сигнала микрофона" /><div className="wave-centerline" /></div>
-                    <div className={`record-limit ${recording === activeSegment ? 'is-recording' : ''}`}><div><span>{recording === activeSegment ? 'Запись завершится автоматически' : 'Максимум для этой реплики'}</span><strong>{formatTime(recording === activeSegment ? recordRemaining : activeSegmentDuration)}</strong></div><div className="record-limit-track"><i style={{ width: `${recording === activeSegment ? recordProgress : 0}%` }} /></div></div>
+                    <div className={`record-limit ${recording === activeSegment ? 'is-recording' : ''}`}><div><span>{recording === activeSegment ? 'Запись завершится автоматически' : `Окно: ${formatTime(activeRecordingWindow.leadIn)} до · реплика · ${formatTime(activeRecordingWindow.tailOut)} после`}</span><strong>{formatTime(recording === activeSegment ? recordRemaining : activeRecordingWindow.duration)}</strong></div><div className="record-limit-track"><i style={{ width: `${recording === activeSegment ? recordProgress : 0}%` }} /></div></div>
                     <div className="record-controls">
                       <button className={originalIsPlaying ? 'is-playing' : ''} type="button" onClick={replayOriginal} disabled={recording !== null || countdown !== null}><span>{originalIsPlaying ? <Pause /> : <Volume2 />}</span><strong>{originalIsPlaying ? 'Остановить' : 'Оригинал'}</strong><small>{originalIsPlaying ? 'идёт воспроизведение' : 'прослушать реплику'}</small></button>
-                      <button className={recording === activeSegment ? 'main-record-control is-recording' : 'main-record-control'} type="button" onClick={() => void toggleRecord(activeSegment)} disabled={countdown !== null}><span>{recording === activeSegment ? <i /> : <Mic />}</span><strong>{recording === activeSegment ? 'Стоп' : countdown !== null ? `${countdown}…` : 'Записать'}</strong><small>{recording === activeSegment ? `осталось ${formatTime(recordRemaining)}` : `до ${formatTime(activeSegmentDuration)}`}</small></button>
+                      <button className={recording === activeSegment ? 'main-record-control is-recording' : 'main-record-control'} type="button" onClick={() => void toggleRecord(activeSegment)} disabled={countdown !== null}><span>{recording === activeSegment ? <i /> : <Mic />}</span><strong>{recording === activeSegment ? 'Стоп' : countdown !== null ? `${countdown}…` : 'Записать'}</strong><small>{recording === activeSegment ? `осталось ${formatTime(recordRemaining)}` : `${formatTime(activeRecordingWindow.duration)} с запасом`}</small></button>
                       <button className={takeIsPlaying ? 'is-playing' : ''} type="button" onClick={() => playTake(activeLine)} disabled={!activeLine.audioUrl || recording !== null}><span>{takeIsPlaying ? <Pause /> : <Headphones />}</span><strong>{takeIsPlaying ? 'Остановить' : 'Мой дубль'}</strong><small>{takeIsPlaying ? 'идёт воспроизведение' : 'прослушать запись'}</small></button>
                       <button type="button" onClick={nextSegment}><span><SkipForward /></span><strong>Дальше</strong><small>следующая реплика</small></button>
                     </div>
@@ -916,7 +977,7 @@ export default function Home() {
                     {segments.map((item) => (
                       <article className={`line-item ${activeSegment === item.id ? 'is-current' : ''}`} key={item.id}>
                         <button className="line-play" type="button" onClick={() => selectSegment(item.id)} aria-label={`Выбрать реплику ${item.id}`}><Play size={15} fill="currentColor" /></button>
-                        <div className="line-copy"><span className="timecode">{formatTime(item.start)} — {formatTime(item.end)}</span><input value={item.text} onChange={(event) => updateText(item.id, event.target.value)} placeholder={transcriptionMode === 'transcribed' ? 'Проверьте субтитр' : 'Введите текст реплики'} aria-label={`Субтитр реплики ${item.id}`} /><div className="mini-wave">{originalLevels.slice(0, 18).map((level, index) => <i key={index} style={{ height: `${Math.max(8, level * 100)}%` }} />)}</div></div>
+                        <div className="line-copy"><span className="timecode">{formatTime(item.start)} — {formatTime(item.end)}</span><textarea rows={2} value={item.text} onChange={(event) => updateText(item.id, event.target.value)} placeholder={transcriptionMode === 'transcribed' ? 'Проверьте или вставьте субтитр' : 'Введите текст реплики'} aria-label={`Субтитр реплики ${item.id}`} /><div className="mini-wave">{originalLevels.slice(0, 18).map((level, index) => <i key={index} style={{ height: `${Math.max(8, level * 100)}%` }} />)}</div></div>
                         <div className="line-actions">
                           {item.state === 'ready' && <button className={`take-button ${playback?.kind === 'take' && playback.segmentId === item.id ? 'is-playing' : ''}`} type="button" onClick={(event) => { event.stopPropagation(); playTake(item); }}>{playback?.kind === 'take' && playback.segmentId === item.id ? <Pause size={15} /> : <Headphones size={15} />} {playback?.kind === 'take' && playback.segmentId === item.id ? 'Стоп' : 'Дубль'}</button>}
                           {item.state === 'original' && <span className="original-badge">Оригинал</span>}

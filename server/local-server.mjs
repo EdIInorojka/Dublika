@@ -21,6 +21,9 @@ const maxVideoBytes = 1024 * 1024 * 1024;
 const maxAudioBytes = 40 * 1024 * 1024;
 const minSegmentSeconds = 2;
 const maxSegmentSeconds = 4;
+const maxNaturalSentenceSeconds = 8;
+const recordingLeadSeconds = 1;
+const recordingTailSeconds = 1;
 const videoExtensions = new Set(['.mp4', '.mov', '.webm', '.mkv', '.m4v']);
 const audioExtensions = new Set(['.webm', '.ogg', '.wav', '.m4a', '.mp3', '.mp4']);
 const allowedOrigins = new Set([
@@ -64,7 +67,7 @@ function setSecurityHeaders(request, response) {
   if (allowedOrigins.has(origin)) {
     response.setHeader('Access-Control-Allow-Origin', origin);
     response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Device-Id, X-File-Name');
+    response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Device-Id, X-File-Name, X-Recording-Lead-In, X-Recording-Tail-Out');
     response.setHeader('Access-Control-Allow-Private-Network', 'true');
     response.setHeader('Vary', 'Origin');
   }
@@ -251,8 +254,10 @@ async function waveformForSegment(project, segment) {
   if (Array.isArray(cached) && cached.length === 96) return cached;
   let samples;
   try {
+    const waveformStart = Math.max(project.trim?.start ?? 0, segment.start - recordingLeadSeconds);
+    const waveformEnd = Math.min(project.trim?.end ?? segment.end, segment.end + recordingTailSeconds);
     samples = await runFfmpegBuffer([
-      '-v', 'error', '-ss', String(segment.start), '-t', String(segment.end - segment.start),
+      '-v', 'error', '-ss', String(waveformStart), '-t', String(Math.max(.35, waveformEnd - waveformStart)),
       '-i', project.inputPath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', '-',
     ], 256 * 1024);
   } catch {
@@ -356,8 +361,9 @@ function transcriptUnits(payload, clipStart, clipEnd) {
 }
 
 /**
- * Build one script cue per natural phrase. A word end, sentence punctuation or
- * natural pause can be a boundary, but every recordable window is 2–4 seconds.
+ * Keep full sentences together whenever possible. Four seconds is a useful
+ * performance target, not a reason to cut a thought in half: a naturally
+ * spoken sentence may take up to eight seconds and gets recording padding.
  */
 function phraseSegments(units, clipStart, clipEnd) {
   const inClip = units.map((unit) => ({
@@ -366,57 +372,52 @@ function phraseSegments(units, clipStart, clipEnd) {
     end: Math.min(clipEnd, unit.end),
   })).filter((unit) => unit.end > unit.start);
   if (!inClip.length) return [];
-  const groups = [];
+
+  const rawGroups = [];
   let group = [];
   const commit = () => {
     if (!group.length) return;
-    groups.push(group);
+    rawGroups.push(group);
     group = [];
   };
+
   for (const unit of inClip) {
     if (!group.length) {
       group.push(unit);
       continue;
     }
     const groupStart = group[0].start;
+    const previousEnd = group[group.length - 1].end;
     const candidateDuration = unit.end - groupStart;
-    const groupDuration = group[group.length - 1].end - groupStart;
-    const gap = unit.start - group[group.length - 1].end;
-    const shouldCut = groupDuration >= minSegmentSeconds && (
-      candidateDuration > maxSegmentSeconds + 0.12 ||
-      (hasPhraseEnd(group[group.length - 1].text) && groupDuration >= 2.25) ||
-      (gap >= 0.35 && groupDuration >= 2.15)
-    );
-    if (shouldCut) commit();
+    const groupDuration = previousEnd - groupStart;
+    const gap = unit.start - previousEnd;
+    // An unpunctuated narration must still have a comfortable ceiling. When
+    // there is punctuation, keep the whole sentence instead of cutting at 4s.
+    if (candidateDuration > maxNaturalSentenceSeconds && groupDuration >= 1.25) commit();
     group.push(unit);
+    const duration = group[group.length - 1].end - group[0].start;
+    if (hasPhraseEnd(unit.text) || (gap >= 0.48 && duration >= 1.6)) commit();
   }
   commit();
 
-  // A trailing short phrase is still useful text. Merge it only when doing so
-  // keeps a take under four seconds; otherwise give it a two-second cue window.
-  if (groups.length > 1) {
-    const last = groups[groups.length - 1];
-    const lastDuration = last[last.length - 1].end - last[0].start;
-    const previous = groups[groups.length - 2];
-    if (lastDuration < minSegmentSeconds && last[last.length - 1].end - previous[0].start <= maxSegmentSeconds + 0.12) {
-      previous.push(...last);
-      groups.pop();
+  // A one-word sentence or a very brief interjection is awkward to record on
+  // its own. Merge it with its neighbour when the complete thought still fits.
+  const groups = [];
+  for (const nextGroup of rawGroups) {
+    const previous = groups[groups.length - 1];
+    const nextDuration = nextGroup[nextGroup.length - 1].end - nextGroup[0].start;
+    if (previous && nextDuration < minSegmentSeconds && nextGroup[nextGroup.length - 1].end - previous[0].start <= maxNaturalSentenceSeconds + 0.25) {
+      previous.push(...nextGroup);
+    } else {
+      groups.push(nextGroup);
     }
   }
 
-  return groups.slice(0, 80).map((group) => {
-    const phraseStart = group[0].start;
-    const phraseEnd = group[group.length - 1].end;
-    // A little lead-in/out makes the cue pleasant to perform while preventing
-    // sub-two-second recording windows. It does not change the source text.
-    const cueStart = Math.max(clipStart, phraseStart - 0.12);
-    const cueEnd = Math.min(clipEnd, Math.max(phraseEnd + 0.18, cueStart + minSegmentSeconds));
-    return {
-      start: rounded(cueStart),
-      end: rounded(Math.min(cueStart + maxSegmentSeconds, cueEnd)),
-      text: group.map((unit) => unit.text).join(' ').replace(/\s+([,.!?…;:])/g, '$1').trim(),
-    };
-  }).filter((segment) => segment.end - segment.start >= minSegmentSeconds - 0.02);
+  return groups.slice(0, 80).map((sentence) => ({
+    start: rounded(Math.max(clipStart, sentence[0].start)),
+    end: rounded(Math.min(clipEnd, sentence[sentence.length - 1].end)),
+    text: sentence.map((unit) => unit.text).join(' ').replace(/\s+([,.!?…;:])/g, '$1').trim(),
+  })).filter((segment) => segment.end - segment.start >= 0.35);
 }
 
 function srtTime(value) {
@@ -534,9 +535,15 @@ async function renderProject(user, project, burnSubtitles = true) {
   recorded.forEach((segment) => args.push('-i', project.recordings[segment.id].path));
   const filters = [];
   recorded.forEach((segment, index) => {
+    const take = project.recordings[segment.id];
+    // Recordings made before this feature have no padding metadata and remain
+    // sample-aligned. New takes include their one-second lead-in and tail-out.
+    const leadIn = Math.min(recordingLeadSeconds, Math.max(0, Number(take.leadIn) || 0));
+    const tailOut = Math.min(recordingTailSeconds, Math.max(0, Number(take.tailOut) || 0));
     const delay = Math.max(0, Math.round((segment.start - project.trim.start) * 1000));
-    const takeDuration = Math.max(.25, segment.end - segment.start);
-    filters.push(`[${index + 1}:a]highpass=f=80,lowpass=f=12000,afftdn=nf=-24,dynaudnorm=f=150:g=13,loudnorm=I=-16:TP=-1.5:LRA=9,atrim=0:${takeDuration.toFixed(3)},asetpts=PTS-STARTPTS,adelay=${delay}:all=1[t${index}]`);
+    const mixedDuration = Math.max(.25, segment.end - segment.start + tailOut);
+    const takeEnd = leadIn + mixedDuration;
+    filters.push(`[${index + 1}:a]highpass=f=80,lowpass=f=12000,afftdn=nf=-24,dynaudnorm=f=150:g=13,loudnorm=I=-16:TP=-1.5:LRA=9,atrim=${leadIn.toFixed(3)}:${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,adelay=${delay}:all=1[t${index}]`);
   });
   const takeLabels = recorded.map((_, index) => `[t${index}]`).join('');
   filters.push(`${takeLabels}amix=inputs=${recorded.length}:normalize=0,alimiter=limit=.9[voice]`);
@@ -688,7 +695,9 @@ async function handleApi(request, response, url) {
     if (!audioExtensions.has(extension)) return sendJson(response, 415, { error: 'Неподдерживаемый аудиоформат' });
     const takePath = join(recordingDir, `${project.id}-${segmentId}-${Date.now()}${extension}`);
     const size = await saveBody(request, takePath, maxAudioBytes);
-    project.recordings[segmentId] = { path: takePath, size, type, createdAt: new Date().toISOString() };
+    const leadIn = Math.min(recordingLeadSeconds, Math.max(0, Number(request.headers['x-recording-lead-in']) || 0));
+    const tailOut = Math.min(recordingTailSeconds, Math.max(0, Number(request.headers['x-recording-tail-out']) || 0));
+    project.recordings[segmentId] = { path: takePath, size, type, leadIn, tailOut, createdAt: new Date().toISOString() };
     const segment = project.segments.find((item) => item.id === segmentId);
     segment.state = 'ready';
     project.updatedAt = new Date().toISOString();
