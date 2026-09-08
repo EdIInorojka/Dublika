@@ -191,6 +191,7 @@ export default function Home() {
   const pendingSegments = segments.filter((item) => item.state === 'pending').length;
   const allSegmentsFinished = analyzed && segments.length > 0 && pendingSegments === 0;
   const currentStep = assembly === 'done' ? 5 : analyzed ? 3 : sourceReady ? 2 : 1;
+  const activeQueuePosition = Math.max(1, segments.findIndex((item) => item.id === activeSegment) + 1);
 
   const timelineBlocks = useMemo(
     () => Array.from({ length: 12 }, (_, index) => ({ id: index, hue: 194 + (index % 4) * 8, lightness: 21 + (index % 3) * 5 })),
@@ -1278,7 +1279,6 @@ export default function Home() {
             {analyzed && (
               <section className="surface dub-console-card">
                 <div className="section-header dub-console-header"><div><span className="section-index">03</span><div><h2>Запишите реплики</h2><p>{transcriptionMode === 'transcribed' ? 'Текст получен от Deepgram. Предложения сохраняем целиком, без обрыва слов.' : 'Таймированные окна по 2–4 секунды. Введите сценарий перед записью.'}</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
-                <div className="segment-navigator" aria-label="Выбор реплики"><div className="segment-navigator-title"><span>Реплики</span><small>выбирайте и записывайте в любом порядке</small></div><div className="segment-navigator-track">{segments.map((item) => <button className={activeSegment === item.id ? 'is-active' : item.state !== 'pending' ? 'is-complete' : ''} type="button" key={item.id} onClick={() => selectSegment(item.id)} title={item.text || `Реплика ${item.id}`}><span>{item.state === 'ready' ? <Check size={13} /> : item.state === 'original' ? <Volume2 size={13} /> : item.id}</span><strong>Реплика {item.id} · {formatTime(item.start)}</strong><small>{item.text || 'Введите текст реплики'}</small></button>)}</div></div>
                 <div className="dub-console">
                   <div className="dub-workbench">
                     <div className="segment-video-wrap">
@@ -1309,7 +1309,16 @@ export default function Home() {
                       <div className="ready-video-actions"><button className="download-button" type="button" onClick={downloadResult}><Download size={18} /> Скачать MP4</button><span>Файл готов к публикации и останется доступен, пока работает ваш локальный медиасервер.</span></div>
                     </section>}
                   </div>
-                  <div className="line-list segment-queue">
+                  <div className="line-list segment-queue" aria-label="Список реплик">
+                    <div className="segment-queue-head">
+                      <div><span>Реплики</span><strong>{activeQueuePosition} / {segments.length}</strong></div>
+                      <Slider className="segment-queue-slider" value={[activeQueuePosition]} min={1} max={Math.max(1, segments.length)} step={1} onValueChange={(value) => {
+                        const raw = Array.isArray(value) ? Number(value[0]) : Number(value);
+                        const item = segments[Math.max(0, Math.min(segments.length - 1, Math.round(raw) - 1))];
+                        if (item) selectSegment(item.id);
+                      }} aria-label="Перейти к реплике" />
+                      <div className="segment-queue-scale"><span>1</span><span>{segments.length}</span></div>
+                    </div>
                     {segments.map((item) => (
                       <article className={`line-item ${activeSegment === item.id ? 'is-current' : ''}`} key={item.id}>
                         <button className="line-play" type="button" onClick={() => selectSegment(item.id)} aria-label={`Выбрать реплику ${item.id}`}><Play size={15} fill="currentColor" /></button>
