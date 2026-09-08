@@ -213,7 +213,7 @@ h1 em { color: #397c5d; font-style: normal; }
 .selection-box.is-active::before,.selection-box.is-active::after { width: 8px; height: 29px; background: #f5fff0; box-shadow: 0 1px 6px rgba(0,0,0,.45); }
 .filmstrip > span.selection-box.is-idle { border-color: rgba(116,198,150,.62); background: rgba(86,180,131,.08); }
 .selection-box.is-idle::before,.selection-box.is-idle::after { display: none; }
-.filmstrip > span.timeline-playhead { position: absolute; top: 0; bottom: 0; z-index: 3; width: 2px; margin-left: -1px; border-radius: 2px; background: white !important; box-shadow: 0 0 0 1px rgba(7,18,13,.35), 0 0 14px rgba(255,255,255,.55); pointer-events: none; }
+.filmstrip > span.timeline-playhead { position: absolute; left: var(--editor-playhead, 0%); top: 0; bottom: 0; z-index: 3; width: 2px; margin-left: -1px; border-radius: 2px; background: white !important; box-shadow: 0 0 0 1px rgba(7,18,13,.35), 0 0 14px rgba(255,255,255,.55); pointer-events: none; will-change: left; }
 .timeline-playhead::before { content: ''; position: absolute; left: 50%; top: 2px; width: 7px; height: 7px; border-radius: 50%; background: white; transform: translateX(-50%); }
 .waveform { height: 34px; display: flex; align-items: center; justify-content: center; gap: 2px; padding: 4px 7px; }
 .waveform i { width: 2px; border-radius: 999px; background: #65a982; opacity: .65; }

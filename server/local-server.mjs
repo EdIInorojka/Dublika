@@ -20,6 +20,7 @@ const statePath = join(dataDir, 'state.json');
 const port = Number(process.env.LOCAL_APP_PORT || 8788);
 const maxVideoBytes = 1024 * 1024 * 1024;
 const maxAudioBytes = 40 * 1024 * 1024;
+const maxSelectedSeconds = 240;
 const minSegmentSeconds = 2;
 const maxSegmentSeconds = 4;
 const maxNaturalSentenceSeconds = 8;

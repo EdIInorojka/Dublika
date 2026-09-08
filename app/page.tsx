@@ -124,6 +124,8 @@ export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLButtonElement>(null);
   const timelineDragRef = useRef<'start' | 'end' | null>(null);
+  const editorAnimationFrameRef = useRef<number | null>(null);
+  const editorPublishedTimeRef = useRef(0);
   const openedProjectRef = useRef<string | null>(null);
   const segmentVideoRef = useRef<HTMLVideoElement>(null);
   const liveWaveRef = useRef<HTMLCanvasElement>(null);
@@ -195,7 +197,51 @@ export default function Home() {
     [],
   );
   const editorWaveform = projectId && editorLevels.length === 96 ? editorLevels.map((level) => Math.max(10, level * 100)) : fallbackWaveform;
-  const playheadPosition = Math.min(100, Math.max(0, editorPlayhead / Math.max(duration, 1) * 100));
+
+  function paintEditorPlayhead(time: number) {
+    const nextTime = Math.max(0, Math.min(duration, Number.isFinite(time) ? time : 0));
+    const position = Math.min(100, Math.max(0, nextTime / Math.max(duration, 1) * 100));
+    // Updating the CSS variable directly keeps the indicator in sync with the
+    // video frame clock. React state is still updated periodically for labels
+    // and keyboard controls, but no longer limits the animation to timeupdate.
+    timelineRef.current?.style.setProperty('--editor-playhead', `${position}%`);
+    return nextTime;
+  }
+
+  function syncEditorPlayhead(time: number, publish = false) {
+    const nextTime = paintEditorPlayhead(time);
+    if (publish || Math.abs(nextTime - editorPublishedTimeRef.current) >= .12) {
+      editorPublishedTimeRef.current = nextTime;
+      setEditorPlayhead(nextTime);
+    }
+  }
+
+  function stopEditorPlayheadAnimation() {
+    if (editorAnimationFrameRef.current !== null) window.cancelAnimationFrame(editorAnimationFrameRef.current);
+    editorAnimationFrameRef.current = null;
+  }
+
+  function startEditorPlayheadAnimation() {
+    stopEditorPlayheadAnimation();
+    const tick = () => {
+      const preview = videoRef.current;
+      if (!preview || preview.paused || preview.ended) {
+        if (preview) syncEditorPlayhead(preview.currentTime, true);
+        editorAnimationFrameRef.current = null;
+        return;
+      }
+      syncEditorPlayhead(preview.currentTime);
+      editorAnimationFrameRef.current = window.requestAnimationFrame(tick);
+    };
+    editorAnimationFrameRef.current = window.requestAnimationFrame(tick);
+  }
+
+  useEffect(() => {
+    syncEditorPlayhead(editorPlayhead, true);
+    return () => stopEditorPlayheadAnimation();
+    // The CSS position needs one refresh when the source duration changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [duration]);
 
   function recordingWindow(segment: Segment) {
     const phraseDuration = Math.max(0.35, segment.end - segment.start);
@@ -469,7 +515,7 @@ export default function Home() {
     if (!nextDuration || !Number.isFinite(nextDuration)) return;
     setDuration(nextDuration);
     if (openedProjectRef.current !== projectId) setSingleClip(0, Math.min(nextDuration, 60));
-    setEditorPlayhead(0);
+    syncEditorPlayhead(0, true);
   }
 
   function setSingleClip(start: number, end: number) {
@@ -522,11 +568,11 @@ export default function Home() {
   function seekEditor(time: number, shouldPlay = false) {
     const nextTime = Math.max(0, Math.min(duration, time));
     const preview = videoRef.current;
-    setEditorPlayhead(nextTime);
+    syncEditorPlayhead(nextTime, true);
     if (!preview) return;
     preview.currentTime = nextTime;
     if (shouldPlay) {
-      void preview.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+      void preview.play().then(() => { setIsPlaying(true); startEditorPlayheadAnimation(); }).catch(() => setIsPlaying(false));
     }
   }
 
@@ -1183,7 +1229,7 @@ export default function Home() {
                 <span className="duration-chip"><Clock3 size={14} /> {formatTime(clipLength)}</span>
               </div>
               <div className="video-stage">
-                {videoUrl ? <video ref={videoRef} src={videoUrl} controls onLoadedMetadata={handleMetadata} onTimeUpdate={() => setEditorPlayhead(videoRef.current?.currentTime || 0)} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)}><track kind="captions" label="Русские субтитры" srcLang="ru" /></video> : (
+                {videoUrl ? <video ref={videoRef} src={videoUrl} controls onLoadedMetadata={handleMetadata} onTimeUpdate={() => syncEditorPlayhead(videoRef.current?.currentTime || 0)} onSeeking={() => syncEditorPlayhead(videoRef.current?.currentTime || 0, true)} onPlay={() => { setIsPlaying(true); startEditorPlayheadAnimation(); }} onPause={() => { stopEditorPlayheadAnimation(); syncEditorPlayhead(videoRef.current?.currentTime || 0, true); setIsPlaying(false); }}><track kind="captions" label="Русские субтитры" srcLang="ru" /></video> : (
                   <button type="button" className="stage-placeholder" onClick={() => setIsPlaying(!isPlaying)}>
                     <span className="scene-light one" /><span className="scene-light two" /><span className="city-line" />
                     <span className="stage-play">{isPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}</span><span className="stage-caption">{sourceReady ? 'Демо-превью' : 'Загрузите видео, чтобы открыть превью'}</span>
@@ -1204,7 +1250,7 @@ export default function Home() {
                     const end = Math.min(100, Math.max(start, clip.end / Math.max(duration, 1) * 100));
                     return <span className={`selection-box ${clip.id === activeClipId ? 'is-active' : 'is-idle'}`} style={{ left: `${start}%`, right: `${100 - end}%` }} key={clip.id} aria-hidden="true" />;
                   })}
-                  <span className="timeline-playhead" style={{ left: `${playheadPosition}%` }} aria-hidden="true" />
+                  <span className="timeline-playhead" aria-hidden="true" />
                 </button>
                 <div className="waveform" aria-label={editorLevels.length === 96 ? 'Форма волны выбранного отрывка' : 'Форма волны будет построена после загрузки видео'}>{editorWaveform.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
                 <Slider className="trim-slider" value={trim} min={0} max={Math.max(duration, 1)} step={0.1} onValueChange={(next) => handleTrim(next, false)} onValueCommitted={() => invalidatePreparedCues()} disabled={!sourceReady} aria-label="Границы отрывка" />
