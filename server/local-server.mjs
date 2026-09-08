@@ -440,8 +440,23 @@ function writeSubtitles(project) {
   return subtitlePath;
 }
 
+function deepgramKeyState() {
+  const key = String(process.env.DEEPGRAM_API_KEY || '').trim();
+  return { key, valid: Boolean(key) && /^[\x21-\x7E]+$/.test(key) };
+}
+
+function deepgramApiKey() {
+  const { key, valid } = deepgramKeyState();
+  if (!key) return null;
+  if (!valid) {
+    throw new Error('Ключ Deepgram содержит лишний текст, пробел или не-латинские символы. Вставьте только сам API key из Deepgram Console и перезапустите сервер.');
+  }
+  return key;
+}
+
 async function transcribeWithDeepgram(inputPath, start, end) {
-  if (!process.env.DEEPGRAM_API_KEY) return null;
+  const apiKey = deepgramApiKey();
+  if (!apiKey) return null;
   // 32 kbps mono MP3 keeps a four-minute clip small and uploads quickly while
   // retaining enough bandwidth for speech recognition.
   const audioPath = join(dataDir, `transcribe-${randomUUID()}.mp3`);
@@ -460,7 +475,7 @@ async function transcribeWithDeepgram(inputPath, start, end) {
     const result = await fetch(`https://api.deepgram.com/v1/listen?${query}`, {
       method: 'POST',
       headers: {
-        Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
+        Authorization: `Token ${apiKey}`,
         'Content-Type': 'audio/mpeg',
       },
       body: readFileSync(audioPath),
@@ -597,12 +612,14 @@ async function downloadPlatformVideo(value, destination) {
 
 async function handleApi(request, response, url) {
   const { pathname } = url;
+  const deepgram = deepgramKeyState();
   if (pathname === '/api/health') return sendJson(response, 200, {
     ok: true,
     ffmpeg: Boolean(ffmpegPath && existsSync(ffmpegPath)),
     ytDlp: existsSync(ytDlpPath),
-    transcription: Boolean(process.env.DEEPGRAM_API_KEY),
+    transcription: deepgram.valid,
     transcriptionProvider: 'deepgram',
+    transcriptionIssue: deepgram.key && !deepgram.valid ? 'invalid_key_format' : null,
     local: true,
   });
   const authHandled = await handleAuth(request, response, pathname);
@@ -630,7 +647,7 @@ async function handleApi(request, response, url) {
     const extension = videoExtensions.has(extname(source.pathname).toLowerCase()) ? extname(source.pathname).toLowerCase() : '.mp4';
     const id = randomUUID();
     const inputPath = join(uploadDir, `${id}${extension}`);
-    const platformHost = /(^|\.)(youtube\.com|youtu\.be|vk\.com|vkvideo\.ru)$/i.test(source.hostname);
+    const platformHost = /(^|\.)(youtube\.com|youtu\.be|vk\.com|vkvideo\.ru|vk\.ru|vkontakte\.ru)$/i.test(source.hostname);
     const size = platformHost ? await downloadPlatformVideo(source.toString(), inputPath) : await downloadRemote(source.toString(), inputPath);
     const title = safeName(body.title || source.pathname.split('/').pop(), 'Видео по ссылке');
     state.projects[id] = { id, userId: user.id, title, inputPath, size, sourceUrl: source.toString(), status: 'uploaded', progress: 0, trim: null, segments: [], recordings: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };

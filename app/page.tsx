@@ -376,7 +376,11 @@ export default function Home() {
           : `Создано ${result.segments.length} таймированных окон по 2–4 секунды. Автосубтитры не включены — впишите сценарий вручную.`);
         return;
       } catch (cause) {
+        setAnalyzing(false);
+        setAnalyzed(false);
+        setSegments([]);
         setMessage(cause instanceof Error ? cause.message : 'Серверный анализ не удался');
+        return;
       }
     }
     setAnalyzing(false);
