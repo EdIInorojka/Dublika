@@ -861,6 +861,8 @@ export default function Home() {
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia) { setMessage('Этот браузер не поддерживает запись. Попробуйте Chrome или Edge.'); return; }
+    let stream: MediaStream | null = null;
+    let recordingContext: AudioContext | null = null;
     try {
       if (recording !== null) {
         stopRecording('manual');
@@ -878,6 +880,20 @@ export default function Home() {
       setActiveSegment(id);
       setLiveTranscript('');
       setTranscriptionState('idle');
+      // Mobile browsers tie microphone and audio-context permissions to the
+      // original tap. Initialise both before the optional countdown.
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+      });
+      const AudioContextConstructor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextConstructor) throw new Error('AudioContext is not supported');
+      recordingContext = new AudioContextConstructor();
+      await recordingContext.resume();
+      const analyser = recordingContext.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.76;
+      recordingContext.createMediaStreamSource(stream).connect(analyser);
+      audioContextRef.current = recordingContext;
       if (countdownEnabled) {
         for (const value of [3, 2, 1]) {
           setCountdown(value);
@@ -885,20 +901,8 @@ export default function Home() {
         }
         setCountdown(null);
       }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
-      });
       const mimeType = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus'].find((type) => MediaRecorder.isTypeSupported(type));
       const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-      const AudioContextConstructor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!AudioContextConstructor) throw new Error('AudioContext is not supported');
-      const audioContext = new AudioContextConstructor();
-      await audioContext.resume();
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 512;
-      analyser.smoothingTimeConstant = 0.76;
-      audioContext.createMediaStreamSource(stream).connect(analyser);
-      audioContextRef.current = audioContext;
       latestLevelsRef.current = Array.from({ length: 96 }, () => 0);
       recordingWaveCursorRef.current = 0;
       recordingChunks.current = [];
@@ -988,6 +992,9 @@ export default function Home() {
       if (recordTickRef.current) window.clearInterval(recordTickRef.current);
       if (previewStartTimeoutRef.current) window.clearTimeout(previewStartTimeoutRef.current);
       previewStartTimeoutRef.current = null;
+      stream?.getTracks().forEach((track) => track.stop());
+      if (audioContextRef.current === recordingContext) audioContextRef.current = null;
+      void recordingContext?.close();
       setCountdown(null);
       setMessage('Не получилось включить микрофон. Разрешите доступ в браузере.');
     }
