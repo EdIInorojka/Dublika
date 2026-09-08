@@ -15,6 +15,7 @@ const uploadDir = join(dataDir, 'uploads');
 const recordingDir = join(dataDir, 'recordings');
 const outputDir = join(dataDir, 'outputs');
 const ytDlpPath = join(root, '.local-bin', 'yt-dlp.exe');
+const deepgramKeyPath = join(root, 'ключ.txt');
 const statePath = join(dataDir, 'state.json');
 const port = Number(process.env.LOCAL_APP_PORT || 8788);
 const maxVideoBytes = 1024 * 1024 * 1024;
@@ -465,7 +466,14 @@ function segmentClip(project, segment) {
 }
 
 function deepgramKeyState() {
-  const key = String(process.env.DEEPGRAM_API_KEY || '').trim();
+  // A desktop launch may not inherit the PowerShell session where the user
+  // pasted the key. The optional ignored local file keeps the key server-side
+  // and lets a restarted media service use the same configuration. It is never
+  // exposed through an API response or included in logs.
+  let key = String(process.env.DEEPGRAM_API_KEY || '').trim();
+  if (!key && existsSync(deepgramKeyPath)) {
+    try { key = readFileSync(deepgramKeyPath, 'utf8').trim(); } catch { /* use no key */ }
+  }
   return { key, valid: Boolean(key) && /^[\x21-\x7E]+$/.test(key) };
 }
 
@@ -539,19 +547,32 @@ async function analyzeProject(project, body) {
 
   project.clips = clips;
   project.trim = { start: clips[0].start, end: clips.at(-1).end };
-  const collected = [];
-  let outputOffset = 0;
-  let allTranscribed = true;
-  let onlyNoSpeech = true;
-  for (const clip of clips) {
+  const analysisStartedAt = Date.now();
+  console.info(`[dublika] analyse ${project.id}: ${clips.length} selected parts, ${totalDuration.toFixed(1)}s total`);
+
+  // The selection is an edit decision, not a set of separate dubbing jobs.
+  // Prepare every chosen piece at once, then flatten the results into one
+  // timeline below. This avoids making a person wait for one Deepgram request
+  // after another when they picked several pieces from the source video.
+  const analyses = await Promise.all(clips.map(async (clip) => {
     let segments = await transcribeWithDeepgram(project.inputPath, clip.start, clip.end);
+    let transcribed = Boolean(segments?.length);
+    let noSpeech = false;
     if (!segments?.length) {
-      allTranscribed = false;
-      onlyNoSpeech &&= deepgramKeyState().valid;
+      noSpeech = deepgramKeyState().valid;
       let log = '';
       try { log = await runFfmpeg(['-hide_banner', '-ss', String(clip.start), '-t', String(clip.end - clip.start), '-i', project.inputPath, '-vn', '-af', 'silencedetect=noise=-32dB:d=0.32', '-f', 'null', '-']); } catch (error) { log = String(error.message || ''); }
       segments = manualSegments(clip.start, clip.end, log);
-    } else onlyNoSpeech = false;
+      transcribed = false;
+    }
+    return { clip, segments, transcribed, noSpeech };
+  }));
+
+  const collected = [];
+  let outputOffset = 0;
+  const allTranscribed = analyses.every((analysis) => analysis.transcribed);
+  const onlyNoSpeech = analyses.every((analysis) => !analysis.transcribed && analysis.noSpeech);
+  for (const { clip, segments } of analyses) {
     for (const segment of segments) {
       const start = rounded(segment.start);
       const end = rounded(segment.end);
@@ -576,6 +597,7 @@ async function analyzeProject(project, body) {
   project.status = 'ready';
   project.updatedAt = new Date().toISOString();
   saveState();
+  console.info(`[dublika] analyse ${project.id}: ${collected.length} cues ready in ${((Date.now() - analysisStartedAt) / 1000).toFixed(1)}s`);
   return { segments: project.segments, clips, transcriptionMode, transcriptionReason };
 }
 

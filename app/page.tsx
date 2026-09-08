@@ -182,6 +182,7 @@ export default function Home() {
   const [originalLevels, setOriginalLevels] = useState<number[]>(Array.from({ length: 96 }, () => 0));
   const [editorLevels, setEditorLevels] = useState<number[]>([]);
   const [editorPlayhead, setEditorPlayhead] = useState(0);
+  const [timelineDragging, setTimelineDragging] = useState(false);
 
   const clipLength = Math.max(1, clips.reduce((total, clip) => total + Math.max(0, clip.end - clip.start), 0));
   const finishedSegments = segments.filter((item) => item.state !== 'pending').length;
@@ -308,11 +309,11 @@ export default function Home() {
   }, [activeSegment, analyzed, projectId]);
 
   useEffect(() => {
-    if (!projectId || !sourceReady) return;
+    if (!projectId || !sourceReady || timelineDragging) return;
     let cancelled = false;
     // Dragging a trim handle can produce many values per second. Waiting a
-    // moment keeps the editor responsive and asks ffmpeg only for the final
-    // range the person is looking at.
+    // moment keeps the editor responsive and asks ffmpeg only after the
+    // person has released a boundary, rather than on every pointer move.
     const timer = window.setTimeout(() => {
       const start = Math.max(0, trim[0]).toFixed(2);
       const end = Math.max(trim[0] + 0.35, trim[1]).toFixed(2);
@@ -321,9 +322,9 @@ export default function Home() {
           if (!cancelled) setEditorLevels(result.levels.length === 96 ? result.levels : []);
         })
         .catch(() => { if (!cancelled) setEditorLevels([]); });
-    }, 220);
+    }, 360);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [projectId, sourceReady, trim[0], trim[1]]);
+  }, [projectId, sourceReady, timelineDragging, trim[0], trim[1]]);
 
   const navigate: Navigate = (path) => {
     window.history.pushState({}, '', path);
@@ -489,7 +490,7 @@ export default function Home() {
     setResultUrl('');
   }
 
-  function handleTrim(next: number | readonly number[]) {
+  function handleTrim(next: number | readonly number[], invalidate = true) {
     const values = Array.isArray(next) ? [...next] : [0, Number(next)];
     const [firstValue = 0, secondValue = Math.min(duration, 60)] = values;
     let start = Math.min(firstValue, secondValue);
@@ -510,7 +511,7 @@ export default function Home() {
     const nextTrim: [number, number] = [Math.round(start * 10) / 10, Math.round(end * 10) / 10];
     setTrim(nextTrim);
     setClips((items) => items.map((clip) => clip.id === activeClipId ? { ...clip, start: nextTrim[0], end: nextTrim[1] } : clip).sort((left, right) => left.start - right.start));
-    invalidatePreparedCues();
+    if (invalidate) invalidatePreparedCues();
   }
 
   function setTrimBoundary(boundary: 'start' | 'end', value: number) {
@@ -559,6 +560,7 @@ export default function Home() {
     else if (Math.abs(time - trim[1]) <= grabDistance) timelineDragRef.current = 'end';
     if (timelineDragRef.current) {
       event.preventDefault();
+      setTimelineDragging(true);
       event.currentTarget.setPointerCapture(event.pointerId);
       return;
     }
@@ -569,13 +571,15 @@ export default function Home() {
     const edge = timelineDragRef.current;
     if (!edge) return;
     event.preventDefault();
-    handleTrim(edge === 'start' ? [timelineTime(event), trim[1]] : [trim[0], timelineTime(event)]);
+    handleTrim(edge === 'start' ? [timelineTime(event), trim[1]] : [trim[0], timelineTime(event)], false);
   }
 
   function handleTimelinePointerUp(event: React.PointerEvent<HTMLButtonElement>) {
     if (!timelineDragRef.current) return;
     timelineDragRef.current = null;
+    setTimelineDragging(false);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    invalidatePreparedCues();
   }
 
   function addClip() {
@@ -629,7 +633,7 @@ export default function Home() {
         setAnalyzing(false);
         setAnalyzed(true);
         setMessage(result.transcriptionMode === 'transcribed'
-          ? `Deepgram распознал речь: ${result.segments.length} смысловых фраз в ${clips.length} фрагм. Предложения сохранены целиком — проверьте текст перед записью.`
+          ? `Выбранные части уже собраны в одну очередь дубляжа. Deepgram распознал ${result.segments.length} смысловых фраз — проверьте текст перед записью.`
           : result.transcriptionReason === 'no_speech'
             ? `В этом фрагменте не нашлось распознаваемой речи. Создано ${result.segments.length} окон по 2–4 секунды — впишите сценарий вручную.`
             : `Создано ${result.segments.length} таймированных окон по 2–4 секунды. Автосубтитры недоступны — впишите сценарий вручную.`);
@@ -1203,7 +1207,7 @@ export default function Home() {
                   <span className="timeline-playhead" style={{ left: `${playheadPosition}%` }} aria-hidden="true" />
                 </button>
                 <div className="waveform" aria-label={editorLevels.length === 96 ? 'Форма волны выбранного отрывка' : 'Форма волны будет построена после загрузки видео'}>{editorWaveform.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
-                <Slider className="trim-slider" value={trim} min={0} max={Math.max(duration, 1)} step={0.1} onValueChange={handleTrim} disabled={!sourceReady} aria-label="Границы отрывка" />
+                <Slider className="trim-slider" value={trim} min={0} max={Math.max(duration, 1)} step={0.1} onValueChange={(next) => handleTrim(next, false)} onValueCommitted={() => invalidatePreparedCues()} disabled={!sourceReady} aria-label="Границы отрывка" />
                 <div className="timeline-scale"><span>0:00</span><span>{formatTime(duration / 2)}</span><span>{formatTime(duration)}</span></div>
                 <div className="timeline-inputs">
                   <label><span>Начало</span><input type="number" min={0} max={Math.max(0, trim[1] - 2)} step="0.1" value={trim[0].toFixed(1)} disabled={!sourceReady} onChange={(event) => setTrimBoundary('start', Number(event.target.value))} /><button type="button" onClick={() => seekEditor(trim[0])} disabled={!sourceReady}>К началу</button></label>
@@ -1216,7 +1220,7 @@ export default function Home() {
                     {clips.map((clip, index) => <div className={`clip-chip ${clip.id === activeClipId ? 'is-active' : ''}`} key={clip.id}><button type="button" onClick={() => selectClip(clip.id)}><strong>Фрагмент {index + 1}</strong><span>{formatTime(clip.start)} — {formatTime(clip.end)}</span></button><button className="clip-remove" type="button" onClick={() => removeClip(clip.id)} aria-label={`Удалить фрагмент ${index + 1}`} disabled={clips.length === 1}>×</button></div>)}
                     <button className="add-clip" type="button" onClick={addClip} disabled={!sourceReady || clips.length >= maxSelectedClips || clipLength >= maxSelectedSeconds}><Plus /> Добавить в позиции {formatTime(editorPlayhead)}</button>
                   </div>
-                  <p>Тяните светлые границы прямо на ленте. Фрагменты не пересекутся, а итоговый MP4 склеит их в указанном порядке.</p>
+                  <p>Фрагменты нужны только чтобы выбрать нужные места видео. Они не пересекутся, а затем сразу станут одной общей очередью дубляжа и одним MP4.</p>
                 </div>
               </div>
               <div className="editor-footer">
