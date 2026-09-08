@@ -569,3 +569,75 @@ h1 em { color: #397c5d; font-style: normal; }
   .studio-app-shell.is-recording-stage .queue-state { width: 17px; height: 17px; border-radius: 6px; }
   .studio-app-shell.is-recording-stage .queue-state svg { width: 10px; }
 }
+
+/* The recording room deliberately reads top-to-bottom: choose a phrase,
+   watch its exact video window, see the sound, then act. There is no right
+   rail competing with the actual work. */
+.dub-console { display: flex; flex-direction: column; min-height: 0; }
+.dub-workbench { width: 100%; border-right: 0; }
+.segment-queue { order: -1; max-height: none; min-height: 126px; display: flex; align-items: stretch; gap: 8px; overflow-x: auto; overflow-y: hidden; padding: 10px 14px; border-bottom: 1px solid #293830; background: #0d1511; scrollbar-color: #6f9177 #16221b; scrollbar-width: thin; }
+.segment-queue-head { position: static; top: auto; z-index: auto; flex: 0 0 142px; display: flex; flex-direction: column; justify-content: center; gap: 8px; margin: 0; padding: 4px 8px 4px 1px; background: transparent; }
+.segment-queue-head > div:first-child { font-size: .65rem; }
+.segment-queue-head > div:first-child strong { color: var(--acid); }
+.segment-queue-slider { padding: 2px 0; }
+.segment-queue-scale { font-size: .55rem; }
+.segment-queue .line-item { flex: 0 0 208px; min-height: 100px; margin: 0; grid-template-columns: 28px minmax(0, 1fr) auto; align-content: start; }
+.segment-queue .line-copy { min-width: 0; }
+.segment-queue .line-copy textarea { height: 54px; min-height: 54px; resize: none; overflow: hidden; line-height: 1.32; }
+.segment-queue .queue-state { margin-top: 1px; }
+
+.studio-result-screen { width: min(1040px, 100%); min-height: min(760px, calc(100vh - 120px)); margin: 26px auto 48px; padding: clamp(20px,4vw,46px); border: 1px solid #31443a; border-radius: 26px; background: radial-gradient(circle at 84% 4%,rgba(165,226,85,.16),transparent 26rem),linear-gradient(145deg,#14241b,#0e1712 60%); color: #ecf5ef; box-shadow: 0 22px 75px rgba(19,39,28,.14); }
+.studio-result-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.studio-result-head > span { display: inline-flex; align-items: center; gap: 7px; color: #b8d1bd; font-size: .74rem; font-weight: 800; }
+.studio-result-head > span svg { color: var(--acid); }
+.result-back-button { display: inline-flex; align-items: center; gap: 7px; min-height: 38px; padding: 0 12px; border: 1px solid #405546; border-radius: 10px; background: #1a2b20; color: #e8f1ea; font-size: .72rem; font-weight: 750; cursor: pointer; }
+.studio-result-copy { max-width: 620px; margin: clamp(28px,5vw,64px) 0 22px; }
+.studio-result-copy .eyebrow { color: #a7bdac; }
+.studio-result-copy h1 { margin: 8px 0 12px; color: white; font-size: clamp(2.25rem,5vw,4.4rem); line-height: .98; letter-spacing: -.065em; }
+.studio-result-copy h1 em { color: var(--acid); font-style: normal; }
+.studio-result-copy > p:last-child { max-width: 520px; margin: 0; color: #9eb1a4; font-size: .9rem; line-height: 1.55; }
+.studio-result-player { overflow: hidden; border: 1px solid #405847; border-radius: 18px; background: #061009; box-shadow: 0 18px 42px rgba(0,0,0,.22); }
+.studio-result-player video { width: 100%; max-height: min(56vh,620px); display: block; background: #020604; object-fit: contain; }
+.studio-result-actions { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+.studio-result-actions .download-button { min-height: 48px; padding-inline: 20px; }
+
+@media (max-width: 720px) {
+  .studio-app-shell.is-recording-stage .dub-console { display: flex; flex-direction: column; min-height: 0; grid-template-columns: none; }
+  .studio-app-shell.is-recording-stage .segment-queue { order: -1; flex: 0 0 70px; min-height: 70px; display: flex; align-items: center; gap: 7px; padding: 7px 10px; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid #293830; }
+  .studio-app-shell.is-recording-stage .segment-queue-head { flex: 0 0 74px; gap: 3px; margin: 0; padding: 0 5px 0 0; }
+  .studio-app-shell.is-recording-stage .segment-queue-head > div:first-child { display: flex; align-items: baseline; gap: 4px; font-size: .52rem; }
+  .studio-app-shell.is-recording-stage .segment-queue-head > div:first-child span { display: block; }
+  .studio-app-shell.is-recording-stage .segment-queue-head > div:first-child strong { font-size: .63rem; }
+  .studio-app-shell.is-recording-stage .segment-queue-slider { padding: 0; }
+  .studio-app-shell.is-recording-stage .segment-queue-scale { display: none; }
+  .studio-app-shell.is-recording-stage .segment-queue .line-item { flex: 0 0 48px; min-height: 50px; display: grid; grid-template-columns: 1fr; place-items: center; gap: 2px; margin: 0; padding: 4px 2px; border-radius: 9px; }
+  .studio-app-shell.is-recording-stage .segment-queue .line-copy { display: none; }
+  .studio-app-shell.is-recording-stage .segment-queue .line-play { width: 25px; height: 25px; }
+  .studio-app-shell.is-recording-stage .segment-queue .line-play svg { display: none; }
+  .studio-app-shell.is-recording-stage .segment-queue .line-play em { display: block; }
+  .studio-app-shell.is-recording-stage .segment-queue .queue-state { width: 17px; height: 17px; margin: 0; border-radius: 6px; }
+  .studio-app-shell.is-recording-stage .dub-workbench { flex: 1; min-height: 0; padding: 10px 12px 12px; overflow: hidden; border: 0; }
+  .studio-app-shell.is-recording-stage .segment-video-wrap { flex: 0 0 auto; height: clamp(156px,31vh,260px); }
+  .studio-app-shell.is-recording-stage .segment-video-wrap video { width: 100%; height: 100%; max-height: none; aspect-ratio: auto; object-fit: cover; }
+  .studio-app-shell.is-recording-stage .active-caption { flex: 0 0 auto; gap: 4px; padding: 9px 0 7px; }
+  .studio-app-shell.is-recording-stage .active-caption textarea { min-height: 48px; max-height: 58px; font-size: .83rem; line-height: 1.32; }
+  .studio-app-shell.is-recording-stage .wave-compare-head { padding: 6px 0; font-size: .52rem; }
+  .studio-app-shell.is-recording-stage .live-wave-shell { height: clamp(100px,16vh,148px); }
+  .studio-app-shell.is-recording-stage .record-limit { flex: 0 0 auto; margin-top: 8px; padding: 7px 9px; }
+  .studio-app-shell.is-recording-stage .record-limit > div:first-child { font-size: .55rem; }
+  .studio-app-shell.is-recording-stage .record-controls { flex: 0 0 auto; margin-top: 8px; padding: 0; grid-template-columns: 1.25fr 1fr 1fr; }
+  .studio-app-shell.is-recording-stage .record-controls > button { min-height: 62px; grid-template-columns: 27px 1fr; padding: 7px; }
+  .studio-app-shell.is-recording-stage .record-controls > button > span { width: 27px; height: 27px; }
+  .studio-app-shell.is-recording-stage .record-controls strong { font-size: .6rem; }
+  .studio-app-shell.is-recording-stage .record-controls small { font-size: .47rem; }
+  .studio-app-shell.is-recording-stage .record-options { display: none; }
+  .studio-app-shell.is-result-stage .topbar { display: none; }
+  .studio-app-shell.is-result-stage .main-area { width: 100%; min-height: 100dvh; padding: 0; }
+  .studio-result-screen { min-height: 100dvh; margin: 0; padding: 20px 15px 28px; border: 0; border-radius: 0; }
+  .studio-result-copy { margin: 36px 0 20px; }
+  .studio-result-copy h1 { font-size: clamp(2.35rem,12vw,3.3rem); }
+  .studio-result-player { border-radius: 14px; }
+  .studio-result-player video { max-height: 54vh; }
+  .studio-result-actions { align-items: stretch; flex-direction: column; }
+  .studio-result-actions > button { min-height: 48px; justify-content: center; }
+}

@@ -355,8 +355,23 @@ function transcriptUnits(payload, clipStart, clipEnd) {
     start: clipStart + Number(word.start),
     end: clipStart + Number(word.end),
     text: String(word.punctuated_word || word.word || '').trim(),
-  })).filter((word) => Number.isFinite(word.start) && Number.isFinite(word.end) && word.end > word.start && word.end > clipStart && word.start < clipEnd && word.text);
-  if (wordUnits.length) return wordUnits;
+  })).filter((word) => Number.isFinite(word.start) && Number.isFinite(word.end) && word.end > word.start && word.end > clipStart && word.start < clipEnd && word.text)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  // Some provider responses repeat the boundary word inside two adjacent
+  // utterances. Treat only an actually overlapping, identical token as a
+  // duplicate — "да, да" with two distinct time ranges remains intact.
+  const uniqueWordUnits = wordUnits.reduce((unique, word) => {
+    const previous = unique.at(-1);
+    const normalise = (value) => value.toLocaleLowerCase('ru').replace(/[^\p{L}\p{N}]+/gu, '');
+    if (previous && word.start <= previous.end + .025 && normalise(word.text) === normalise(previous.text)) {
+      previous.end = Math.max(previous.end, word.end);
+      if (/[.!?…]$/.test(word.text)) previous.text = word.text;
+      return unique;
+    }
+    unique.push(word);
+    return unique;
+  }, []);
+  if (uniqueWordUnits.length) return uniqueWordUnits;
   const utteranceUnits = utterances.map((utterance) => ({
     start: clipStart + Number(utterance.start),
     end: clipStart + Number(utterance.end),
@@ -490,10 +505,12 @@ function deepgramApiKey() {
 async function transcribeWithDeepgram(inputPath, start, end) {
   const apiKey = deepgramApiKey();
   if (!apiKey) return null;
-  // 32 kbps mono MP3 keeps a four-minute clip small and uploads quickly while
-  // retaining enough bandwidth for speech recognition.
+  // 24 kHz / 64 kbps still keeps a four-minute selection compact, but retains
+  // consonants and short Russian function words much better than the old
+  // 16 kHz / 32 kbps proxy. Those were the common cause of a caption ending
+  // while the audible phrase was still continuing.
   const audioPath = join(dataDir, `transcribe-${randomUUID()}.mp3`);
-  await runFfmpeg(['-y', '-ss', String(start), '-t', String(end - start), '-i', inputPath, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '32k', audioPath]);
+  await runFfmpeg(['-y', '-ss', String(start), '-t', String(end - start), '-i', inputPath, '-vn', '-ac', '1', '-ar', '24000', '-c:a', 'libmp3lame', '-b:a', '64k', audioPath]);
   try {
     const query = new URLSearchParams({
       model: process.env.DEEPGRAM_TRANSCRIBE_MODEL || 'nova-3',
@@ -501,8 +518,11 @@ async function transcribeWithDeepgram(inputPath, start, end) {
       // mixed-language. Nova-3 multilingual keeps their real phrase timing.
       language: process.env.DEEPGRAM_LANGUAGE || 'multi',
       smart_format: 'true',
+      punctuate: 'true',
       utterances: 'true',
-      utt_split: '0.55',
+      // A short silence is natural inside one sentence. Waiting a little
+      // longer keeps the words that belong to one spoken thought together.
+      utt_split: '0.8',
       paragraphs: 'true',
       numerals: 'true',
       mip_opt_out: process.env.DEEPGRAM_MIP_OPT_OUT || 'true',

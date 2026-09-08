@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowLeft,
   ArrowRight,
   BadgeCheck,
   Captions,
@@ -186,6 +187,12 @@ export default function Home() {
   const [editorPlayhead, setEditorPlayhead] = useState(0);
   const [timelineDragging, setTimelineDragging] = useState(false);
 
+  useEffect(() => {
+    const handlePopState = () => setRoute(`${window.location.pathname}${window.location.search}${window.location.hash}`);
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
   const clipLength = Math.max(1, clips.reduce((total, clip) => total + Math.max(0, clip.end - clip.start), 0));
   const finishedSegments = segments.filter((item) => item.state !== 'pending').length;
   const pendingSegments = segments.filter((item) => item.state === 'pending').length;
@@ -193,6 +200,9 @@ export default function Home() {
   const currentStep = assembly === 'done' ? 5 : analyzed ? 3 : sourceReady ? 2 : 1;
   const activeQueuePosition = Math.max(1, segments.findIndex((item) => item.id === activeSegment) + 1);
   const firstPendingId = segments.find((item) => item.state === 'pending')?.id ?? null;
+  const studioView = new URLSearchParams(route.split('?')[1] || '').get('view');
+  const showResultView = studioView === 'result' && assembly === 'done' && Boolean(resultUrl);
+  const showRecordingView = analyzed && studioView !== 'edit' && !showResultView;
 
   const timelineBlocks = useMemo(
     () => Array.from({ length: 12 }, (_, index) => ({ id: index, hue: 194 + (index % 4) * 8, lightness: 21 + (index % 3) * 5 })),
@@ -268,12 +278,6 @@ export default function Home() {
   useEffect(() => {
     return () => { if (videoUrl.startsWith('blob:')) URL.revokeObjectURL(videoUrl); };
   }, [videoUrl]);
-
-  useEffect(() => {
-    const syncRoute = () => setRoute(`${window.location.pathname}${window.location.search}${window.location.hash}`);
-    window.addEventListener('popstate', syncRoute);
-    return () => window.removeEventListener('popstate', syncRoute);
-  }, []);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', darkMode);
@@ -681,6 +685,8 @@ export default function Home() {
         setTranscriptionMode(result.transcriptionMode);
         setAnalyzing(false);
         setAnalyzed(true);
+        window.history.replaceState({}, '', `/studio?project=${projectId}&view=edit`);
+        navigate(`/studio?project=${projectId}&view=record`);
         setMessage(result.transcriptionMode === 'transcribed'
           ? `Выбранные части уже собраны в одну очередь дубляжа. Deepgram распознал ${result.segments.length} смысловых фраз — проверьте текст перед записью.`
           : result.transcriptionReason === 'no_speech'
@@ -1156,6 +1162,7 @@ export default function Home() {
           setCredits(status.credits);
           window.localStorage.setItem('dublika-credits', String(status.credits));
           setMessage('Готово: фрагменты склеены, голос очищен, исходная речь подавлена, MP4 собран.');
+          navigate(`/studio?project=${projectId}&view=result`);
           return;
         }
         if (status.status === 'failed') throw new Error(status.error || 'Не удалось собрать видео');
@@ -1224,7 +1231,7 @@ export default function Home() {
     <SidebarProvider defaultOpen>
       <AppSidebar route="/studio" navigate={navigate} />
       <SidebarInset className="studio-inset">
-    <div className={`app-shell studio-app-shell ${analyzed ? 'is-recording-stage' : ''}`}>
+    <div className={`app-shell studio-app-shell ${showRecordingView ? 'is-recording-stage' : ''} ${showResultView ? 'is-result-stage' : ''}`}>
       <header className="topbar">
         <div className="studio-brand-group"><SidebarTrigger /><button className="brand" type="button" onClick={() => navigate('/')} aria-label="Дублика — на главную">
           <span className="brand-mark"><span>Д</span></span><span className="brand-word">дублика</span><span className="beta">beta</span>
@@ -1241,6 +1248,28 @@ export default function Home() {
       </header>
 
       <main id="top" className="main-area">
+        {showResultView ? (
+          <section className="studio-result-screen" aria-label="Готовый дубляж">
+            <header className="studio-result-head">
+              <button className="result-back-button" type="button" onClick={() => navigate(`/studio?project=${projectId}&view=record`)}>
+                <ArrowLeft size={18} /> К репликам
+              </button>
+              <span><BadgeCheck size={17} /> Дубляж готов</span>
+            </header>
+            <div className="studio-result-copy">
+              <p className="eyebrow"><span /> результат</p>
+              <h1>Видео собрано.<br /><em>Можно публиковать.</em></h1>
+              <p>Ваш голос выровнен, исходная речь приглушена. Субтитры в файл не добавлялись.</p>
+            </div>
+            <div className="studio-result-player">
+              <video src={resultUrl} controls playsInline><track kind="captions" label="Русские субтитры" srcLang="ru" /></video>
+            </div>
+            <div className="studio-result-actions">
+              <button className="download-button" type="button" onClick={downloadResult}><Download size={19} /> Скачать MP4</button>
+              <button className="secondary-button" type="button" onClick={() => navigate(`/studio?project=${projectId}&view=edit`)}><Scissors size={17} /> Изменить фрагменты</button>
+            </div>
+          </section>
+        ) : <>
         <section className="page-heading">
           <div><p className="eyebrow"><span /> новый проект</p><h1>Озвучьте видео<br /><em>своим голосом</em></h1></div>
           <div className={`privacy-note local-server-note ${backendOnline ? 'is-online' : ''}`}><ShieldCheck size={22} /><p><strong>{backendOnline ? 'Локальный сервер работает' : 'Режим просмотра'}</strong><span>{backendOnline ? 'Файлы остаются на этом компьютере' : 'Запустите npm run local для обработки'}</span></p></div>
@@ -1333,7 +1362,7 @@ export default function Home() {
               </div>
             </section>
 
-            {analyzed && (
+            {showRecordingView && (
               <section className="surface dub-console-card">
                 <div className="section-header dub-console-header"><div><span className="section-index">03</span><div><h2>Запишите реплики</h2><p>{transcriptionMode === 'transcribed' ? 'Текст получен от Deepgram. Предложения сохраняем целиком, без обрыва слов.' : 'Таймированные окна по 2–4 секунды. Введите сценарий перед записью.'}</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
                 <div className="dub-console">
@@ -1357,11 +1386,6 @@ export default function Home() {
                     <div className="record-options">
                       <div className="record-option-row"><span className="option-icon"><TimerReset /></span><span><strong>Отсчёт 3 секунды</strong><small>Даёт время приготовиться</small></span><Switch aria-label="Включить трёхсекундный отсчёт" checked={countdownEnabled} onCheckedChange={setCountdownEnabled} /></div>
                     </div>
-                    {assembly === 'done' && resultUrl && <section className="ready-video-card" aria-label="Готовое видео">
-                      <div className="ready-video-head"><span><BadgeCheck /> Готово</span><div><strong>Ваш дубляж собран</strong><small>Голос нормализован, оригинальная речь подавлена, фон сохранён.</small></div></div>
-                      <video className="ready-video-preview" src={resultUrl} controls playsInline><track kind="captions" label="Русские субтитры" srcLang="ru" /></video>
-                      <div className="ready-video-actions"><button className="download-button" type="button" onClick={downloadResult}><Download size={18} /> Скачать MP4</button><span>Файл готов к публикации и останется доступен, пока работает ваш локальный медиасервер.</span></div>
-                    </section>}
                   </div>
                   <div className="line-list segment-queue" aria-label="Список реплик">
                     <div className="segment-queue-head">
@@ -1403,6 +1427,7 @@ export default function Home() {
             <section id="projects" className="quota-card"><div><span>Осталось обработок</span><strong>{plan === 'Пробный' ? `${credits} из 3` : '5 из 5'}</strong></div><Progress value={plan === 'Пробный' ? credits / 3 * 100 : 100} /><button type="button" onClick={() => setPricingOpen(true)}>Получить ещё обработки <ArrowRight size={15} /></button></section>
           </aside>
         </div>
+        </>}
 
         {message && <output className="toast-message"><Check size={17} /><span>{message}</span><button onClick={() => setMessage('')} aria-label="Закрыть сообщение"><X size={15} /></button></output>}
       </main>
