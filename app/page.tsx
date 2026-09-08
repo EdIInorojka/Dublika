@@ -249,12 +249,12 @@ export default function Home() {
     const id = await createRemoteProject(demoVideo, 'Цветы крупным планом.mp4');
     if (id) {
       try {
-        const result = await apiFetch<{ segments: Segment[]; transcriptionMode: 'transcribed' | 'manual' }>(`/projects/${id}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start: 0, end: 5.05 }) });
+        const result = await apiFetch<{ segments: Segment[]; transcriptionMode: 'transcribed' | 'manual'; transcriptionReason?: 'no_speech' | 'unavailable' | null }>(`/projects/${id}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start: 0, end: 5.05 }) });
         setSegments(result.segments);
         setTranscriptionMode(result.transcriptionMode);
         setAnalyzed(true);
         setActiveSegment(1);
-        setMessage(result.transcriptionMode === 'transcribed' ? 'Демо-проект готов: текст получен из речи.' : 'Демо не содержит распознанного текста. Введите свой сценарий в таймированные реплики.');
+        setMessage(result.transcriptionMode === 'transcribed' ? 'Демо-проект готов: текст получен из речи.' : result.transcriptionReason === 'no_speech' ? 'В аудио демо не нашлось распознаваемой речи. Введите сценарий в таймированные реплики.' : 'Демо не содержит распознанного текста. Введите свой сценарий в таймированные реплики.');
         return;
       } catch (cause) {
         setMessage(cause instanceof Error ? cause.message : 'Не удалось подготовить демо');
@@ -365,7 +365,7 @@ export default function Home() {
     setMessage('Отделяем речь, распознаём текст и ищем паузы…');
     if (projectId) {
       try {
-        const result = await apiFetch<{ segments: Segment[]; transcriptionMode: 'transcribed' | 'manual' }>(`/projects/${projectId}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start: trim[0], end: trim[1] }) });
+        const result = await apiFetch<{ segments: Segment[]; transcriptionMode: 'transcribed' | 'manual'; transcriptionReason?: 'no_speech' | 'unavailable' | null }>(`/projects/${projectId}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start: trim[0], end: trim[1] }) });
         setSegments(result.segments);
         setActiveSegment(result.segments[0]?.id || 1);
         setTranscriptionMode(result.transcriptionMode);
@@ -373,7 +373,9 @@ export default function Home() {
         setAnalyzed(true);
         setMessage(result.transcriptionMode === 'transcribed'
           ? `Deepgram распознал речь: ${result.segments.length} фраз по 2–4 секунды. Проверьте текст перед записью.`
-          : `Создано ${result.segments.length} таймированных окон по 2–4 секунды. Автосубтитры не включены — впишите сценарий вручную.`);
+          : result.transcriptionReason === 'no_speech'
+            ? `В этом фрагменте не нашлось распознаваемой речи. Создано ${result.segments.length} окон по 2–4 секунды — впишите сценарий вручную.`
+            : `Создано ${result.segments.length} таймированных окон по 2–4 секунды. Автосубтитры недоступны — впишите сценарий вручную.`);
         return;
       } catch (cause) {
         setAnalyzing(false);

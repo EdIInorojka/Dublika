@@ -464,7 +464,9 @@ async function transcribeWithDeepgram(inputPath, start, end) {
   try {
     const query = new URLSearchParams({
       model: process.env.DEEPGRAM_TRANSCRIBE_MODEL || 'nova-3',
-      language: process.env.DEEPGRAM_LANGUAGE || 'ru',
+      // The studio is Russian-first, but source videos are often English or
+      // mixed-language. Nova-3 multilingual keeps their real phrase timing.
+      language: process.env.DEEPGRAM_LANGUAGE || 'multi',
       smart_format: 'true',
       utterances: 'true',
       utt_split: '0.55',
@@ -505,8 +507,10 @@ async function analyzeProject(project, body) {
   project.trim = { start, end };
   let segments = await transcribeWithDeepgram(project.inputPath, start, end);
   let transcriptionMode = 'transcribed';
+  let transcriptionReason = null;
   if (!segments?.length) {
     transcriptionMode = 'manual';
+    transcriptionReason = deepgramKeyState().valid ? 'no_speech' : 'unavailable';
     let log = '';
     try { log = await runFfmpeg(['-hide_banner', '-ss', String(start), '-t', String(end - start), '-i', project.inputPath, '-vn', '-af', 'silencedetect=noise=-32dB:d=0.32', '-f', 'null', '-']); } catch (error) { log = String(error.message || ''); }
     segments = manualSegments(start, end, log);
@@ -517,7 +521,7 @@ async function analyzeProject(project, body) {
   project.status = 'ready';
   project.updatedAt = new Date().toISOString();
   saveState();
-  return { segments: project.segments, transcriptionMode };
+  return { segments: project.segments, transcriptionMode, transcriptionReason };
 }
 
 async function renderProject(user, project, burnSubtitles = true) {
