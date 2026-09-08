@@ -32,6 +32,11 @@ const allowedOrigins = new Set([
   `http://localhost:${port}`,
   `http://127.0.0.1:${port}`,
   'https://dublika-studio.gusta-voglenn19586.chatgpt.site',
+  // The public studio is static on Vercel, while media processing remains on
+  // this local machine behind the tunnel. Keep the stable production alias
+  // here instead of relying on a PowerShell-only environment variable: the
+  // allow-list must survive a normal server restart.
+  'https://site-five-woad-16.vercel.app',
   ...String(process.env.DUBLIKA_ALLOWED_ORIGINS || '').split(',').map((origin) => origin.trim()).filter(Boolean),
 ]);
 
