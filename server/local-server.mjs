@@ -249,17 +249,15 @@ async function sourceHasAudio(path) {
   try { await runFfmpeg(['-hide_banner', '-i', path, '-map', '0:a:0', '-t', '0.1', '-f', 'null', '-']); return true; } catch { return false; }
 }
 
-async function waveformForSegment(project, segment) {
-  const cached = project.waveforms?.[segment.id];
-  if (Array.isArray(cached) && cached.length === 96) return cached;
+async function waveformForRange(project, start, end) {
   let samples;
   try {
-    const waveformStart = Math.max(project.trim?.start ?? 0, segment.start - recordingLeadSeconds);
-    const waveformEnd = Math.min(project.trim?.end ?? segment.end, segment.end + recordingTailSeconds);
+    const waveformStart = Math.max(0, Number(start) || 0);
+    const waveformEnd = Math.max(waveformStart + .35, Number(end) || waveformStart + .35);
     samples = await runFfmpegBuffer([
       '-v', 'error', '-ss', String(waveformStart), '-t', String(Math.max(.35, waveformEnd - waveformStart)),
-      '-i', project.inputPath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', '-',
-    ], 256 * 1024);
+      '-i', project.inputPath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '1000', '-f', 's16le', '-',
+    ], 1024 * 1024);
   } catch {
     return Array.from({ length: 96 }, () => 0);
   }
@@ -275,6 +273,15 @@ async function waveformForSegment(project, segment) {
     }
     levels.push(rounded(Math.min(1, Math.sqrt(sum / Math.max(1, to - from)) * 2.4)));
   }
+  return levels;
+}
+
+async function waveformForSegment(project, segment) {
+  const cached = project.waveforms?.[segment.id];
+  if (Array.isArray(cached) && cached.length === 96) return cached;
+  const waveformStart = Math.max(project.trim?.start ?? 0, segment.start - recordingLeadSeconds);
+  const waveformEnd = Math.min(project.trim?.end ?? segment.end, segment.end + recordingTailSeconds);
+  const levels = await waveformForRange(project, waveformStart, waveformEnd);
   project.waveforms ??= {};
   project.waveforms[segment.id] = levels;
   saveState();
@@ -670,6 +677,16 @@ async function handleApi(request, response, url) {
     const user = actor(request);
     const projects = Object.values(state.projects).filter((project) => project.userId === user.id).map(({ inputPath: _input, outputPath: _output, recordings: _recordings, ...project }) => project);
     return sendJson(response, 200, { projects, credits: user.credits, plan: user.plan });
+  }
+
+  const editorWaveformMatch = pathname.match(/^\/api\/projects\/([a-f0-9-]+)\/waveform$/i);
+  if (editorWaveformMatch && request.method === 'GET') {
+    const access = projectFor(request, editorWaveformMatch[1]);
+    if (!access) return sendJson(response, 404, { error: 'Проект не найден' });
+    const start = Math.max(0, Number(url.searchParams.get('start')) || 0);
+    const requestedEnd = Number(url.searchParams.get('end'));
+    const end = Math.min(start + 240, Math.max(start + .35, Number.isFinite(requestedEnd) ? requestedEnd : start + .35));
+    return sendJson(response, 200, { levels: await waveformForRange(access.project, start, end) });
   }
 
   const projectMatch = pathname.match(/^\/api\/projects\/([a-f0-9-]+)(?:\/(analyze|render|status)|\/segments\/([0-9]+)(\/waveform)?)?$/i);

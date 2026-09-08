@@ -94,7 +94,8 @@ type Segment = {
   audioUrl?: string;
 };
 
-const waveform = [18, 28, 34, 22, 48, 62, 38, 74, 54, 82, 44, 68, 30, 58, 72, 42, 88, 64, 46, 76, 34, 56, 84, 52, 70, 38, 60, 78, 48, 66, 26, 52, 72, 40, 58, 80, 46, 68, 36, 54, 74, 44, 62, 28, 50, 70, 38, 56];
+// Used only before the local media service has returned an actual waveform.
+const fallbackWaveform = [18, 28, 34, 22, 48, 62, 38, 74, 54, 82, 44, 68, 30, 58, 72, 42, 88, 64, 46, 76, 34, 56, 84, 52, 70, 38, 60, 78, 48, 66, 26, 52, 72, 40, 58, 80, 46, 68, 36, 54, 74, 44, 62, 28, 50, 70, 38, 56];
 const demoVideo = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4';
 const recordingLeadSeconds = 1;
 const recordingTailSeconds = 1;
@@ -109,6 +110,7 @@ function formatTime(value: number) {
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const timelineRef = useRef<HTMLButtonElement>(null);
   const segmentVideoRef = useRef<HTMLVideoElement>(null);
   const liveWaveRef = useRef<HTMLCanvasElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -162,6 +164,8 @@ export default function Home() {
   const [burnSubtitles, setBurnSubtitles] = useState(true);
   const [transcriptionMode, setTranscriptionMode] = useState<'transcribed' | 'manual' | null>(null);
   const [originalLevels, setOriginalLevels] = useState<number[]>(Array.from({ length: 96 }, () => 0));
+  const [editorLevels, setEditorLevels] = useState<number[]>([]);
+  const [editorPlayhead, setEditorPlayhead] = useState(0);
 
   const clipLength = Math.max(1, trim[1] - trim[0]);
   const finishedSegments = segments.filter((item) => item.state !== 'pending').length;
@@ -173,6 +177,10 @@ export default function Home() {
     () => Array.from({ length: 12 }, (_, index) => ({ id: index, hue: 194 + (index % 4) * 8, lightness: 21 + (index % 3) * 5 })),
     [],
   );
+  const editorWaveform = projectId && editorLevels.length === 96 ? editorLevels.map((level) => Math.max(10, level * 100)) : fallbackWaveform;
+  const selectionStart = Math.min(100, Math.max(0, trim[0] / Math.max(duration, 1) * 100));
+  const selectionEnd = Math.min(100, Math.max(selectionStart, trim[1] / Math.max(duration, 1) * 100));
+  const playheadPosition = Math.min(100, Math.max(0, editorPlayhead / Math.max(duration, 1) * 100));
 
   function recordingWindow(segment: Segment) {
     const phraseDuration = Math.max(0.35, segment.end - segment.start);
@@ -230,6 +238,24 @@ export default function Home() {
     return () => { cancelled = true; };
   }, [activeSegment, analyzed, projectId]);
 
+  useEffect(() => {
+    if (!projectId || !sourceReady) return;
+    let cancelled = false;
+    // Dragging a trim handle can produce many values per second. Waiting a
+    // moment keeps the editor responsive and asks ffmpeg only for the final
+    // range the person is looking at.
+    const timer = window.setTimeout(() => {
+      const start = Math.max(0, trim[0]).toFixed(2);
+      const end = Math.max(trim[0] + 0.35, trim[1]).toFixed(2);
+      void apiFetch<{ levels: number[] }>(`/projects/${projectId}/waveform?start=${start}&end=${end}`)
+        .then((result) => {
+          if (!cancelled) setEditorLevels(result.levels.length === 96 ? result.levels : []);
+        })
+        .catch(() => { if (!cancelled) setEditorLevels([]); });
+    }, 220);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [projectId, sourceReady, trim[0], trim[1]]);
+
   const navigate: Navigate = (path) => {
     window.history.pushState({}, '', path);
     setRoute(path);
@@ -250,6 +276,7 @@ export default function Home() {
     try {
       const result = await apiFetch<{ project: { id: string; inputUrl: string }; credits: number }>('/projects/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, title }) });
       setProjectId(result.project.id);
+      setEditorLevels([]);
       setVideoUrl(mediaUrl(result.project.inputUrl));
       setCredits(result.credits);
       window.localStorage.setItem('dublika-credits', String(result.credits));
@@ -318,6 +345,7 @@ export default function Home() {
     try {
       const result = await apiFetch<{ project: { id: string; inputUrl: string }; credits: number }>('/projects/upload', { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) }, body: file });
       setProjectId(result.project.id);
+      setEditorLevels([]);
       setVideoUrl(mediaUrl(result.project.inputUrl));
       setCredits(result.credits);
       window.localStorage.setItem('dublika-credits', String(result.credits));
@@ -371,19 +399,45 @@ export default function Home() {
     if (!nextDuration || !Number.isFinite(nextDuration)) return;
     setDuration(nextDuration);
     setTrim([0, Math.min(nextDuration, 60)]);
+    setEditorPlayhead(0);
   }
 
   function handleTrim(next: number | readonly number[]) {
     const values = Array.isArray(next) ? [...next] : [0, Number(next)];
-    const [selectedStart, initialEnd] = values;
-    let start = selectedStart;
-    let end = initialEnd;
+    const [firstValue = 0, secondValue = Math.min(duration, 60)] = values;
+    let start = Math.min(firstValue, secondValue);
+    let end = Math.max(firstValue, secondValue);
+    start = Math.max(0, Math.min(duration, Number.isFinite(start) ? start : 0));
+    end = Math.max(0, Math.min(duration, Number.isFinite(end) ? end : Math.min(duration, 60)));
     if (end - start > 240) end = start + 240;
     if (duration >= 2 && end - start < 2) {
       end = Math.min(duration, start + 2);
       start = Math.max(0, end - 2);
     }
-    setTrim([Math.max(0, start), Math.min(duration, end)]);
+    setTrim([Math.round(start * 10) / 10, Math.round(end * 10) / 10]);
+  }
+
+  function setTrimBoundary(boundary: 'start' | 'end', value: number) {
+    if (!Number.isFinite(value)) return;
+    handleTrim(boundary === 'start' ? [value, trim[1]] : [trim[0], value]);
+  }
+
+  function seekEditor(time: number, shouldPlay = false) {
+    const nextTime = Math.max(0, Math.min(duration, time));
+    const preview = videoRef.current;
+    setEditorPlayhead(nextTime);
+    if (!preview) return;
+    preview.currentTime = nextTime;
+    if (shouldPlay) {
+      void preview.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+    }
+  }
+
+  function seekFromTimeline(event: React.PointerEvent<HTMLButtonElement>) {
+    if (!sourceReady || !timelineRef.current) return;
+    const bounds = timelineRef.current.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width)));
+    seekEditor(ratio * duration);
   }
 
   async function analyzeClip() {
@@ -924,7 +978,7 @@ export default function Home() {
                 <span className="duration-chip"><Clock3 size={14} /> {formatTime(clipLength)}</span>
               </div>
               <div className="video-stage">
-                {videoUrl ? <video ref={videoRef} src={videoUrl} controls onLoadedMetadata={handleMetadata}><track kind="captions" label="Русские субтитры" srcLang="ru" /></video> : (
+                {videoUrl ? <video ref={videoRef} src={videoUrl} controls onLoadedMetadata={handleMetadata} onTimeUpdate={() => setEditorPlayhead(videoRef.current?.currentTime || 0)} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)}><track kind="captions" label="Русские субтитры" srcLang="ru" /></video> : (
                   <button type="button" className="stage-placeholder" onClick={() => setIsPlaying(!isPlaying)}>
                     <span className="scene-light one" /><span className="scene-light two" /><span className="city-line" />
                     <span className="stage-play">{isPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}</span><span className="stage-caption">{sourceReady ? 'Демо-превью' : 'Загрузите видео, чтобы открыть превью'}</span>
@@ -934,10 +988,23 @@ export default function Home() {
               </div>
               <div className="timeline">
                 <div className="timeline-toolbar"><span>{formatTime(trim[0])}</span><div><Scissors size={15} /> Выбранный фрагмент</div><span>{formatTime(trim[1])}</span></div>
-                <div className="filmstrip" aria-hidden="true">{timelineBlocks.map((block) => <span key={block.id} style={{ '--hue': block.hue, '--light': `${block.lightness}%` } as React.CSSProperties} />)}<div className="selection-box" /></div>
-                <div className="waveform" aria-hidden="true">{waveform.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
+                <button ref={timelineRef} className="filmstrip" type="button" disabled={!sourceReady} onPointerDown={seekFromTimeline} onKeyDown={(event) => {
+                  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+                  event.preventDefault();
+                  seekEditor(editorPlayhead + (event.key === 'ArrowRight' ? 1 : -1));
+                }} aria-label={`Текущая позиция ${formatTime(editorPlayhead)}. Нажмите по ленте, чтобы перейти к моменту видео.`}>
+                  {timelineBlocks.map((block) => <span key={block.id} style={{ '--hue': block.hue, '--light': `${block.lightness}%` } as React.CSSProperties} />)}
+                  <span className="selection-box" style={{ left: `${selectionStart}%`, right: `${100 - selectionEnd}%` }} aria-hidden="true" />
+                  <span className="timeline-playhead" style={{ left: `${playheadPosition}%` }} aria-hidden="true" />
+                </button>
+                <div className="waveform" aria-label={editorLevels.length === 96 ? 'Форма волны выбранного отрывка' : 'Форма волны будет построена после загрузки видео'}>{editorWaveform.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
                 <Slider className="trim-slider" value={trim} min={0} max={Math.max(duration, 1)} step={0.1} onValueChange={handleTrim} disabled={!sourceReady} aria-label="Границы отрывка" />
                 <div className="timeline-scale"><span>0:00</span><span>{formatTime(duration / 2)}</span><span>{formatTime(duration)}</span></div>
+                <div className="timeline-inputs">
+                  <label><span>Начало</span><input type="number" min={0} max={Math.max(0, trim[1] - 2)} step="0.1" value={trim[0].toFixed(1)} disabled={!sourceReady} onChange={(event) => setTrimBoundary('start', Number(event.target.value))} /><button type="button" onClick={() => seekEditor(trim[0])} disabled={!sourceReady}>К началу</button></label>
+                  <label><span>Конец</span><input type="number" min={Math.min(duration, trim[0] + 2)} max={duration} step="0.1" value={trim[1].toFixed(1)} disabled={!sourceReady} onChange={(event) => setTrimBoundary('end', Number(event.target.value))} /><button type="button" onClick={() => seekEditor(trim[1])} disabled={!sourceReady}>К концу</button></label>
+                  <button className="timeline-reset" type="button" disabled={!sourceReady} onClick={() => { handleTrim([0, Math.min(duration, 60)]); seekEditor(0); }}>Сбросить отрывок</button>
+                </div>
               </div>
               <div className="editor-footer">
                 <div className="quality-note"><WandSparkles size={18} /><p><strong>Умная обработка</strong><span>Приглушим оригинал под дублем и сохраним фон</span></p></div>
@@ -972,6 +1039,11 @@ export default function Home() {
                       <div className="record-option-row"><span className="option-icon"><Headphones /></span><span><strong>Слушать оригинал</strong><small>Тихо в наушниках во время записи</small></span><Switch aria-label="Слушать оригинал во время записи" checked={originalMonitor} onCheckedChange={setOriginalMonitor} /></div>
                     </div>
                     {allSegmentsFinished && assembly !== 'done' && <output className="final-dub-cta"><span className="final-dub-icon"><BadgeCheck /></span><div><strong>Все реплики готовы</strong><small>Проверьте дубли или сразу соберите итоговый ролик.</small></div><button type="button" onClick={assembleVideo} disabled={assembly === 'processing'}>{assembly === 'processing' ? <><span className="loader" /> {assemblyProgress}%</> : <><Sparkles /> Создать итоговый дубляж</>}</button></output>}
+                    {assembly === 'done' && resultUrl && <section className="ready-video-card" aria-label="Готовое видео">
+                      <div className="ready-video-head"><span><BadgeCheck /> Готово</span><div><strong>Ваш дубляж собран</strong><small>Голос нормализован, фон сохранён, субтитры {burnSubtitles ? 'добавлены в MP4' : 'отключены'}.</small></div></div>
+                      <video className="ready-video-preview" src={resultUrl} controls playsInline><track kind="captions" label="Русские субтитры" srcLang="ru" /></video>
+                      <div className="ready-video-actions"><button className="download-button" type="button" onClick={downloadResult}><Download size={18} /> Скачать MP4</button><span>Файл готов к публикации и останется доступен, пока работает ваш локальный медиасервер.</span></div>
+                    </section>}
                   </div>
                   <div className="line-list segment-queue">
                     {segments.map((item) => (
