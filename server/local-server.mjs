@@ -26,6 +26,7 @@ const maxSegmentSeconds = 4;
 const maxNaturalSentenceSeconds = 4.8;
 const recordingLeadSeconds = 1;
 const recordingTailSeconds = 1;
+const mediaTokenLifetimeMs = 7 * 24 * 60 * 60 * 1000;
 const videoExtensions = new Set(['.mp4', '.mov', '.webm', '.mkv', '.m4v']);
 const audioExtensions = new Set(['.webm', '.ogg', '.wav', '.m4a', '.mp3', '.mp4']);
 const allowedOrigins = new Set([
@@ -123,6 +124,38 @@ function signToken(userId) {
   const payload = Buffer.from(JSON.stringify({ userId, expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 })).toString('base64url');
   const signature = createHmac('sha256', state.secret).update(payload).digest('base64url');
   return `${payload}.${signature}`;
+}
+
+function signMediaToken(projectId, resource) {
+  const payload = Buffer.from(JSON.stringify({ projectId, resource, expiresAt: Date.now() + mediaTokenLifetimeMs })).toString('base64url');
+  const signature = createHmac('sha256', state.secret).update(`media:${payload}`).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+function hasMediaToken(url, projectId, resource) {
+  const token = String(url.searchParams.get('access') || '');
+  const [payload, signature] = token.split('.');
+  if (!payload || !signature) return false;
+  const expected = createHmac('sha256', state.secret).update(`media:${payload}`).digest();
+  let supplied;
+  try { supplied = Buffer.from(signature, 'base64url'); } catch { return false; }
+  if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) return false;
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return parsed.projectId === projectId && parsed.resource === resource && Number(parsed.expiresAt) > Date.now();
+  } catch { return false; }
+}
+
+function sourceMediaUrl(project) {
+  return `/media/projects/${project.id}/source?access=${encodeURIComponent(signMediaToken(project.id, 'source'))}`;
+}
+
+function takeMediaUrl(project, segmentId) {
+  return `/media/projects/${project.id}/takes/${segmentId}?access=${encodeURIComponent(signMediaToken(project.id, `take:${segmentId}`))}`;
+}
+
+function outputMediaUrl(project) {
+  return `/media/outputs/${project.id}.mp4?access=${encodeURIComponent(signMediaToken(project.id, 'output'))}`;
 }
 
 function tokenUser(request) {
@@ -777,7 +810,7 @@ async function handleApi(request, response, url) {
     const size = await saveBody(request, inputPath, maxVideoBytes);
     state.projects[id] = { id, userId: user.id, title: originalName, inputPath, size, status: 'uploaded', progress: 0, trim: null, segments: [], recordings: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     saveState();
-    return sendJson(response, 201, { project: { id, title: originalName, status: 'uploaded', inputUrl: `/media/projects/${id}/source` }, credits: user.credits });
+    return sendJson(response, 201, { project: { id, title: originalName, status: 'uploaded', inputUrl: sourceMediaUrl(state.projects[id]) }, credits: user.credits });
   }
 
   if (pathname === '/api/projects/import' && request.method === 'POST') {
@@ -792,15 +825,15 @@ async function handleApi(request, response, url) {
     const title = safeName(body.title || source.pathname.split('/').pop(), 'Видео по ссылке');
     state.projects[id] = { id, userId: user.id, title, inputPath, size, sourceUrl: source.toString(), status: 'uploaded', progress: 0, trim: null, segments: [], recordings: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     saveState();
-    return sendJson(response, 201, { project: { id, title, status: 'uploaded', inputUrl: `/media/projects/${id}/source` }, credits: user.credits });
+    return sendJson(response, 201, { project: { id, title, status: 'uploaded', inputUrl: sourceMediaUrl(state.projects[id]) }, credits: user.credits });
   }
 
   if (pathname === '/api/projects' && request.method === 'GET') {
     const user = actor(request);
     const projects = Object.values(state.projects).filter((project) => project.userId === user.id).map(({ inputPath: _input, outputPath: _output, recordings: _recordings, ...project }) => ({
       ...project,
-      inputUrl: `/media/projects/${project.id}/source`,
-      outputUrl: project.outputUrl || null,
+      inputUrl: sourceMediaUrl(project),
+      outputUrl: project.outputUrl ? outputMediaUrl(project) : null,
     }));
     return sendJson(response, 200, { projects, credits: user.credits, plan: user.plan });
   }
@@ -826,8 +859,8 @@ async function handleApi(request, response, url) {
 
   if (!action && !Number.isFinite(segmentId) && request.method === 'GET') {
     const { inputPath: _input, outputPath: _output, recordings, ...safeProject } = project;
-    const segments = project.segments.map((segment) => recordings?.[segment.id] ? { ...segment, audioUrl: `/media/projects/${project.id}/takes/${segment.id}` } : segment);
-    return sendJson(response, 200, { project: { ...safeProject, segments, inputUrl: `/media/projects/${project.id}/source`, outputUrl: project.outputUrl || null }, credits: user.credits });
+    const segments = project.segments.map((segment) => recordings?.[segment.id] ? { ...segment, audioUrl: takeMediaUrl(project, segment.id) } : segment);
+    return sendJson(response, 200, { project: { ...safeProject, segments, inputUrl: sourceMediaUrl(project), outputUrl: project.outputUrl ? outputMediaUrl(project) : null }, credits: user.credits });
   }
   if (action === 'analyze' && request.method === 'POST') return sendJson(response, 200, await analyzeProject(project, await readJson(request)));
   if (wantsWaveform && request.method === 'GET') {
@@ -849,7 +882,7 @@ async function handleApi(request, response, url) {
     segment.state = 'ready';
     project.updatedAt = new Date().toISOString();
     saveState();
-    return sendJson(response, 201, { ok: true, segmentId, takeUrl: `/media/projects/${project.id}/takes/${segmentId}` });
+    return sendJson(response, 201, { ok: true, segmentId, takeUrl: takeMediaUrl(project, segmentId) });
   }
   if (action === 'render' && request.method === 'POST') {
     if (project.status === 'processing') return sendJson(response, 409, { error: 'Рендер уже выполняется' });
@@ -863,7 +896,7 @@ async function handleApi(request, response, url) {
     renderProject(user, project).catch((error) => { project.status = 'failed'; project.error = String(error.message || error).slice(-1000); saveState(); });
     return sendJson(response, 202, { ok: true, status: 'processing' });
   }
-  if (action === 'status' && request.method === 'GET') return sendJson(response, 200, { status: project.status, progress: project.progress || 0, error: project.error || null, outputUrl: project.outputUrl || null, credits: user.credits });
+  if (action === 'status' && request.method === 'GET') return sendJson(response, 200, { status: project.status, progress: project.progress || 0, error: project.error || null, outputUrl: project.outputUrl ? outputMediaUrl(project) : null, credits: user.credits });
   return sendJson(response, 405, { error: 'Метод не поддерживается' });
 }
 
@@ -900,16 +933,21 @@ const server = createServer(async (request, response) => {
     if (url.pathname.startsWith('/media/outputs/')) {
       const name = safeName(url.pathname.split('/').pop(), 'missing');
       const path = join(outputDir, name);
+      const projectId = name.replace(/\.mp4$/i, '');
+      const project = state.projects[projectId];
+      if (!project || !hasMediaToken(url, projectId, 'output')) return sendJson(response, 403, { error: 'Нет доступа к медиафайлу' });
       return existsSync(path) ? sendFile(request, response, path) : sendJson(response, 404, { error: 'Файл не найден' });
     }
     const projectSource = url.pathname.match(/^\/media\/projects\/([a-f0-9-]+)\/source$/i);
     if (projectSource) {
       const project = state.projects[projectSource[1]];
+      if (!project || !hasMediaToken(url, project.id, 'source')) return sendJson(response, 403, { error: 'Нет доступа к медиафайлу' });
       return project?.inputPath && existsSync(project.inputPath) ? sendFile(request, response, project.inputPath) : sendJson(response, 404, { error: 'Файл не найден' });
     }
     const projectTake = url.pathname.match(/^\/media\/projects\/([a-f0-9-]+)\/takes\/([0-9]+)$/i);
     if (projectTake) {
       const project = state.projects[projectTake[1]];
+      if (!project || !hasMediaToken(url, project.id, `take:${projectTake[2]}`)) return sendJson(response, 403, { error: 'Нет доступа к медиафайлу' });
       const take = project?.recordings?.[Number(projectTake[2])];
       return take?.path && existsSync(take.path) ? sendFile(request, response, take.path) : sendJson(response, 404, { error: 'Запись не найдена' });
     }
