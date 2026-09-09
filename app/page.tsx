@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -46,7 +46,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { apiFetch, mediaUrl } from '@/lib/local-api';
 
 type SourceKind = 'file' | 'link' | 'demo';
-type SegmentState = 'ready' | 'pending' | 'original';
+// `saving` is intentionally distinct from `ready`: a take can be heard from
+// the local Blob immediately, but must not be allowed into the final render
+// until the server has acknowledged that it was saved.
+type SegmentState = 'ready' | 'pending' | 'saving' | 'original';
 type PlaybackState = { kind: 'original' | 'take'; segmentId: number } | null;
 type RecordingSession = {
   segmentId: number;
@@ -168,21 +171,21 @@ export default function Home() {
   const [takeUploads, setTakeUploads] = useState(0);
   const [renderQueued, setRenderQueued] = useState(false);
   const [message, setMessage] = useState('');
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [, setIsPlaying] = useState(false);
   const [assembly, setAssembly] = useState<'idle' | 'processing' | 'done'>('idle');
   const [assemblyProgress, setAssemblyProgress] = useState(0);
   const [pricingOpen, setPricingOpen] = useState(false);
   const [signedIn, setSignedIn] = useState(() => typeof window !== 'undefined' && window.localStorage.getItem('dublika-auth') === '1');
   const [plan] = useState('Пробный');
-  const [countdownEnabled, setCountdownEnabled] = useState(true);
+  const [countdownEnabled] = useState(true);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [recordElapsed, setRecordElapsed] = useState(0);
   const [liveTranscript, setLiveTranscript] = useState('');
-  const [transcriptionState, setTranscriptionState] = useState<'idle' | 'listening' | 'unsupported' | 'error'>('idle');
+  const [, setTranscriptionState] = useState<'idle' | 'listening' | 'unsupported' | 'error'>('idle');
   const [playback, setPlayback] = useState<PlaybackState>(null);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [backendOnline, setBackendOnline] = useState(false);
+  const [, setBackendOnline] = useState(false);
   const [resultUrl, setResultUrl] = useState('');
   const [credits, setCredits] = useState(() => Number(typeof window !== 'undefined' ? window.localStorage.getItem('dublika-credits') || 3 : 3));
   const [transcriptionMode, setTranscriptionMode] = useState<'transcribed' | 'manual' | null>(null);
@@ -200,12 +203,13 @@ export default function Home() {
   }, []);
 
   const clipLength = clips.reduce((total, clip) => total + Math.max(0, clip.end - clip.start), 0);
-  const finishedSegments = segments.filter((item) => item.state !== 'pending').length;
-  const pendingSegments = segments.filter((item) => item.state === 'pending').length;
+  const isSegmentSaved = (item: Segment) => item.state === 'ready' && Boolean(item.audioUrl);
+  const finishedSegments = segments.filter(isSegmentSaved).length;
+  const pendingSegments = segments.filter((item) => !isSegmentSaved(item)).length;
   const allSegmentsFinished = analyzed && segments.length > 0 && pendingSegments === 0 && takeUploads === 0;
   const currentStep = wizardStep;
   const activeQueuePosition = Math.max(1, segments.findIndex((item) => item.id === activeSegment) + 1);
-  const firstPendingId = segments.find((item) => item.state === 'pending')?.id ?? null;
+  const firstPendingId = segments.find((item) => !isSegmentSaved(item))?.id ?? null;
   const studioView = new URLSearchParams(route.split('?')[1] || '').get('view');
   const showResultView = studioView === 'result' && assembly === 'done' && Boolean(resultUrl);
   const showRecordingView = analyzed && wizardStep === 4 && !showResultView;
@@ -308,7 +312,16 @@ export default function Home() {
 
   useEffect(() => {
     const query = route.includes('?') ? route.slice(route.indexOf('?') + 1).split('#')[0] : '';
-    const requestedId = new URLSearchParams(query).get('project');
+    const queryParams = new URLSearchParams(query);
+    const requestedId = queryParams.get('project');
+    const requestedView = queryParams.get('view');
+    // A project may already be in memory when the user goes Back or opens a
+    // result link.  The screen still has to follow the URL; previously this
+    // early return left people on the recording screen after "Изменить
+    // фрагменты" or a browser Back action.
+    if (requestedView === 'edit') setWizardStep(2);
+    else if (requestedView === 'text') setWizardStep(3);
+    else if (requestedView === 'record') setWizardStep(4);
     if (!requestedId || requestedId === openedProjectRef.current) return;
     let cancelled = false;
     openedProjectRef.current = requestedId;
@@ -344,7 +357,7 @@ export default function Home() {
         setActiveSegment(project.segments[0]?.id || 1);
         setTranscriptionMode(project.transcriptionMode || (project.segments.some((segment) => segment.text) ? 'transcribed' : null));
         setAnalyzed(project.segments.length > 0);
-        setWizardStep(project.segments.length > 0 ? 4 : 2);
+        setWizardStep(requestedView === 'edit' ? 2 : requestedView === 'text' ? 3 : project.segments.length > 0 ? 4 : 2);
         setAssembly(project.status === 'done' && project.outputUrl ? 'done' : 'idle');
         setResultUrl(project.outputUrl ? mediaUrl(project.outputUrl) : '');
         setCredits(nextCredits);
@@ -422,6 +435,18 @@ export default function Home() {
     if (hash) window.setTimeout(() => document.getElementById(hash)?.scrollIntoView({ behavior: 'smooth' }), 60);
   };
 
+  function studioRouteFor(step: 1 | 2 | 3 | 4) {
+    if (step === 1 || !projectId) return '/studio';
+    const view = step === 2 ? 'edit' : step === 3 ? 'text' : 'record';
+    return `/studio?project=${projectId}&view=${view}`;
+  }
+
+  function goToWizardStep(step: 1 | 2 | 3 | 4) {
+    stopPlayback();
+    setWizardStep(step);
+    navigate(studioRouteFor(step));
+  }
+
   function handleSignedIn(email: string) {
     window.localStorage.setItem('dublika-auth', '1');
     window.localStorage.setItem('dublika-user', email);
@@ -469,14 +494,22 @@ export default function Home() {
         setTranscriptionMode(result.transcriptionMode);
         setAnalyzed(true);
         setActiveSegment(1);
+        setWizardStep(3);
+        navigate(`/studio?project=${id}&view=text`);
         setMessage(result.transcriptionMode === 'transcribed' ? 'Сцена готова. Проверьте текст перед записью.' : 'Сцена готова. Добавьте текст для реплик перед записью.');
         return;
       } catch {
+        setSourceReady(false);
+        setVideoUrl('');
+        setWizardStep(1);
         setMessage('Не удалось открыть сцену. Попробуйте ещё раз.');
       }
     }
     setSegments([]);
     setAnalyzed(false);
+    setSourceReady(false);
+    setVideoUrl('');
+    setWizardStep(1);
     setMessage('Не удалось открыть сцену. Попробуйте ещё раз.');
   }
 
@@ -557,6 +590,13 @@ export default function Home() {
     setMessage('Загружаем видео по ссылке…');
     const id = await createRemoteProject(value, value.includes('youtu') ? 'Видео с YouTube' : value.includes('vk') ? 'Видео из VK' : 'Видео по ссылке');
     if (id) setMessage('Видео готово к выбору фрагментов.');
+    else {
+      // Do not leave a "loaded" project with a decorative empty player after
+      // an importer error.  The user can correct the link right on step 01.
+      setSourceReady(false);
+      setVideoUrl('');
+      setWizardStep(1);
+    }
   }
 
   function handleMetadata() {
@@ -576,11 +616,12 @@ export default function Home() {
       setTrim([0, 0]);
       return;
     }
-    setSingleClip(0, Math.min(nextDuration, 60));
+    setSingleClip(0, Math.min(nextDuration, 60), nextDuration);
   }
 
-  function setSingleClip(start: number, end: number) {
-    const requestedEnd = Math.max(0, Number(end) || 0);
+  function setSingleClip(start: number, end: number, sourceDuration = duration) {
+    const maximum = Math.max(0, Number(sourceDuration) || Number(end) || 0);
+    const requestedEnd = Math.min(maximum, Math.max(0, Number(end) || 0));
     const nextStart = Math.max(0, Math.min(Number(start) || 0, Math.max(0, requestedEnd - 2)));
     const nextEnd = Math.max(nextStart + 2, requestedEnd);
     const clip: Clip = { id: 'clip-1', start: Math.round(nextStart * 10) / 10, end: Math.round(nextEnd * 10) / 10 };
@@ -747,11 +788,11 @@ export default function Home() {
           ? `Готово: ${result.segments.length} реплик. Проверьте текст перед записью.`
           : `Готово: ${result.segments.length} реплик. Добавьте текст перед записью.`);
         return;
-      } catch {
+      } catch (cause) {
         setAnalyzing(false);
         setAnalyzed(false);
         setSegments([]);
-        setMessage('Не удалось подготовить реплики. Попробуйте ещё раз.');
+        setMessage(cause instanceof Error ? cause.message : 'Не удалось подготовить реплики. Попробуйте ещё раз.');
         return;
       }
     }
@@ -800,8 +841,13 @@ export default function Home() {
       const samples = new Uint8Array(analyser.fftSize);
       analyser.getByteTimeDomainData(samples);
       let energy = 0;
-      for (const sample of samples) energy += Math.abs(sample - 128) / 128;
-      const level = Math.min(1, energy / samples.length);
+      for (const sample of samples) {
+        const value = (sample - 128) / 128;
+        energy += value * value;
+      }
+      // FFmpeg sends RMS buckets for the red original layer.  Use the same
+      // unit for the live green layer so equal loudness has equal height.
+      const level = Math.min(1, Math.sqrt(energy / samples.length));
       // A take is written from its beginning to its end.  Shifting samples
       // left made the recording look like a news ticker and hid timing.
       const session = recordingSessionRef.current;
@@ -937,9 +983,13 @@ export default function Home() {
         return;
       }
       const target = segments.find((item) => item.id === id);
-      const firstPending = segments.find((item) => item.state === 'pending');
+      const firstPending = segments.find((item) => !isSegmentSaved(item));
       if (!target) throw new Error('Реплика не найдена');
-      if (target.state === 'pending' && firstPending && firstPending.id !== id) {
+      if (target.state === 'saving') {
+        setMessage('Сохраняем этот дубль. Подождите секунду перед следующей записью.');
+        return;
+      }
+      if (!isSegmentSaved(target) && firstPending && firstPending.id !== id) {
         setMessage(`Сначала запишите реплику ${firstPending.id}. Пропускать незаписанные фразы нельзя.`);
         return;
       }
@@ -993,11 +1043,11 @@ export default function Home() {
         }
         const audioUrl = URL.createObjectURL(blob);
         const segmentId = recordingSession.segmentId;
-        const willFinish = segments.every((item) => item.id === segmentId || item.state !== 'pending');
+        const willFinish = segments.every((item) => item.id === segmentId || isSegmentSaved(item));
         const waveform = [...latestLevelsRef.current];
         // Live browser transcription is a recording aid only. It must not
         // overwrite Deepgram's prepared phrase while the person is reading it.
-        setSegments((items) => items.map((item) => item.id === segmentId ? { ...item, state: 'ready', audioUrl, waveform } : item));
+        setSegments((items) => items.map((item) => item.id === segmentId ? { ...item, state: 'saving', audioUrl, waveform } : item));
         const savedMessage = willFinish
           ? 'Все реплики готовы. Можно собрать итоговый дубляж.'
           : recordingSession.stopReason === 'limit'
@@ -1015,13 +1065,17 @@ export default function Home() {
             body: blob,
             })
             .then((result) => {
-              setSegments((items) => items.map((item) => item.id === segmentId ? { ...item, audioUrl: mediaUrl(result.takeUrl) } : item));
+              setSegments((items) => items.map((item) => item.id === segmentId ? { ...item, state: 'ready', audioUrl: mediaUrl(result.takeUrl) } : item));
               setBackendOnline(true);
               setMessage(savedMessage);
             })
-            .catch(() => setMessage('Не удалось сохранить дубль. Запишите его ещё раз.'))
+            .catch(() => {
+              setSegments((items) => items.map((item) => item.id === segmentId ? { ...item, state: 'pending', audioUrl: undefined } : item));
+              setMessage('Не удалось сохранить дубль. Запишите его ещё раз.');
+            })
             .finally(() => setTakeUploads((count) => Math.max(0, count - 1)));
         } else {
+          setSegments((items) => items.map((item) => item.id === segmentId ? { ...item, state: 'ready' } : item));
           setMessage(willFinish ? savedMessage : 'Дубль сохранён.');
         }
         if (recordingSessionRef.current === recordingSession) recordingSessionRef.current = null;
@@ -1087,9 +1141,9 @@ export default function Home() {
 
   function selectSegment(id: number) {
     const target = segments.find((item) => item.id === id);
-    const firstPending = segments.find((item) => item.state === 'pending');
+    const firstPending = segments.find((item) => !isSegmentSaved(item));
     if (!target) return;
-    if (target.state === 'pending' && firstPending && firstPending.id !== id) {
+    if (!isSegmentSaved(target) && firstPending && firstPending.id !== id) {
       setMessage(`Сначала запишите реплику ${firstPending.id}. Следующая откроется после неё.`);
       return;
     }
@@ -1107,7 +1161,7 @@ export default function Home() {
       setMessage('Сначала запишите текущую реплику. Пропускать незаписанные фразы нельзя.');
       return;
     }
-    const next = segments.find((item) => item.state === 'pending');
+    const next = segments.find((item) => !isSegmentSaved(item));
     if (next) {
       selectSegment(next.id);
       return;
@@ -1302,7 +1356,7 @@ export default function Home() {
         {showResultView ? (
           <section className="studio-result-screen" aria-label="Готовый дубляж">
             <header className="studio-result-head">
-              <button className="result-back-button" type="button" onClick={() => navigate(`/studio?project=${projectId}&view=record`)}>
+              <button className="result-back-button" type="button" onClick={() => goToWizardStep(4)}>
                 <ArrowLeft size={18} /> К репликам
               </button>
               <span><BadgeCheck size={17} /> Дубляж готов</span>
@@ -1317,7 +1371,7 @@ export default function Home() {
             </div>
             <div className="studio-result-actions">
               <button className="download-button" type="button" onClick={downloadResult}><Download size={19} /> Скачать MP4</button>
-              <button className="secondary-button" type="button" onClick={() => navigate(`/studio?project=${projectId}&view=edit`)}><Scissors size={17} /> Изменить фрагменты</button>
+              <button className="secondary-button" type="button" onClick={() => goToWizardStep(2)}><Scissors size={17} /> Изменить фрагменты</button>
             </div>
           </section>
         ) : <>
@@ -1326,7 +1380,7 @@ export default function Home() {
         </section>}
 
         <section className="stepper wizard-stepper" aria-label="Прогресс проекта">
-          {wizardStep > 1 && <button className="wizard-back" type="button" onClick={() => { stopPlayback(); setWizardStep((step) => Math.max(1, step - 1) as 1 | 2 | 3 | 4); }}>Назад</button>}
+          {wizardStep > 1 && <button className="wizard-back" type="button" onClick={() => goToWizardStep((wizardStep - 1) as 1 | 2 | 3 | 4)}>Назад</button>}
           {[['01', 'Видео'], ['02', 'Фрагменты'], ['03', 'Текст'], ['04', 'Озвучка']].map(([number, label], index) => (
             <div className={`step ${index + 1 === currentStep ? 'is-current' : index + 1 < currentStep ? 'is-complete' : ''}`} key={number}>
               <span className="step-dot">{index + 1 < currentStep ? <Check size={14} /> : number}</span><span>{label}</span>{index < 3 && <i />}
@@ -1379,7 +1433,7 @@ export default function Home() {
                   event.preventDefault();
                   seekEditor(editorPlayhead + (event.key === 'ArrowRight' ? 1 : -1));
                 }} aria-label={`Текущая позиция ${formatTime(editorPlayhead)}. Тяните светлые границы активного фрагмента или нажмите по ленте, чтобы перейти к моменту видео.`}>
-                  {timelineThumbnails.length ? timelineThumbnails.map((thumbnail, index) => <span className="timeline-frame" key={thumbnail} style={{ backgroundImage: `url("${thumbnail}")` }} aria-hidden="true" />) : Array.from({ length: 12 }, (_, index) => <span className="timeline-frame is-loading" key={index} aria-hidden="true" />)}
+                  {timelineThumbnails.length ? timelineThumbnails.map((thumbnail) => <span className="timeline-frame" key={thumbnail} style={{ backgroundImage: `url("${thumbnail}")` }} aria-hidden="true" />) : Array.from({ length: 12 }, (_, index) => <span className="timeline-frame is-loading" key={index} aria-hidden="true" />)}
                   {clips.map((clip) => {
                     const start = Math.min(100, Math.max(0, clip.start / Math.max(duration, 1) * 100));
                     const end = Math.min(100, Math.max(start, clip.end / Math.max(duration, 1) * 100));
@@ -1417,7 +1471,7 @@ export default function Home() {
               <div className="cue-review-list" aria-label="Текст реплик">
                 {segments.map((item) => <label className="cue-review-row" key={item.id}><span><b>{item.id}</b><small>{formatTime(item.start)} — {formatTime(item.end)}</small></span><textarea rows={2} value={item.text} onChange={(event) => updateText(item.id, event.target.value)} placeholder="Введите текст реплики" aria-label={`Текст реплики ${item.id}`} /></label>)}
               </div>
-              <footer className="cue-review-footer"><span><Check size={16} /> Текст сохранится вместе с проектом</span><button className="primary-button" type="button" onClick={() => { setWizardStep(4); navigate(`/studio?project=${projectId}&view=record`); }}>К записи <ArrowRight size={18} /></button></footer>
+              <footer className="cue-review-footer"><span><Check size={16} /> Текст сохранится вместе с проектом</span><button className="primary-button" type="button" onClick={() => goToWizardStep(4)}>К записи <ArrowRight size={18} /></button></footer>
             </section>}
 
             {showRecordingView && (
@@ -1434,9 +1488,10 @@ export default function Home() {
                     <div className="active-caption"><span>Реплика {activeSegment}</span><textarea rows={2} value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} placeholder="Введите текст реплики" aria-label="Текст активной реплики" /></div>
                     <div className="wave-compare-head"><div><span className="legend-original"><i /> Оригинал</span><span className="legend-dub"><i /> Ваш дубль</span></div><span className={recording === activeSegment ? 'live-indicator is-live' : 'live-indicator'}><i /> {recording === activeSegment ? 'микрофон активен' : activeLine.audioUrl ? 'дубль записан' : 'готов к записи'}</span></div>
                     <div className="live-wave-shell"><canvas ref={liveWaveRef} className="live-wave-canvas" aria-label="Сравнение громкости оригинала и живого сигнала микрофона" /><div className="wave-centerline" /></div>
+                    {recording === activeSegment && liveTranscript && <p className="recording-transcript" aria-live="polite"><span>Распознано</span>{liveTranscript}</p>}
                     <div className={`record-limit ${recording === activeSegment ? 'is-recording' : ''}`}><div><span>{recording === activeSegment ? 'Идёт запись' : 'Время на реплику'}</span><strong>{formatTime(recording === activeSegment ? recordRemaining : activeRecordingWindow.duration)}</strong></div><div className="record-limit-track"><i style={{ width: `${recording === activeSegment ? recordProgress : 0}%` }} /></div></div>
                     <div className="record-controls">
-                      <button className={recording === activeSegment ? 'main-record-control is-recording' : 'main-record-control'} type="button" onClick={() => void toggleRecord(activeSegment)} disabled={countdown !== null}><span>{recording === activeSegment ? <i /> : <Mic />}</span><strong>{recording === activeSegment ? 'Стоп' : countdown !== null ? `${countdown}…` : 'Записать'}</strong><small>{recording === activeSegment ? `осталось ${formatTime(recordRemaining)}` : `${formatTime(activeRecordingWindow.duration)} с запасом`}</small></button>
+                      <button className={recording === activeSegment ? 'main-record-control is-recording' : 'main-record-control'} type="button" onClick={() => void toggleRecord(activeSegment)} disabled={countdown !== null || activeLine.state === 'saving'}><span>{recording === activeSegment ? <i /> : <Mic />}</span><strong>{recording === activeSegment ? 'Стоп' : activeLine.state === 'saving' ? 'Сохраняем…' : countdown !== null ? `${countdown}…` : 'Записать'}</strong><small>{recording === activeSegment ? `осталось ${formatTime(recordRemaining)}` : `${formatTime(activeRecordingWindow.duration)} с запасом`}</small></button>
                       <button className={takeIsPlaying ? 'is-playing' : ''} type="button" onClick={() => playTake(activeLine)} disabled={!activeLine.audioUrl || recording !== null}><span>{takeIsPlaying ? <Pause /> : <Headphones />}</span><strong>{takeIsPlaying ? 'Остановить' : 'Мой дубль'}</strong><small>{takeIsPlaying ? 'идёт воспроизведение' : 'прослушать запись'}</small></button>
                       <button type="button" onClick={nextSegment} disabled={recording !== null || countdown !== null}><span><SkipForward /></span><strong>{allSegmentsFinished ? 'Собрать' : 'Дальше'}</strong><small>{allSegmentsFinished ? 'запустить рендер' : 'следующая реплика'}</small></button>
                     </div>
@@ -1452,11 +1507,11 @@ export default function Home() {
                       <div className="segment-queue-scale"><span>1</span><span>{segments.length}</span></div>
                     </div>
                     {segments.map((item) => (
-                      <article className={`line-item ${activeSegment === item.id ? 'is-current' : ''} ${item.state === 'pending' && firstPendingId !== item.id ? 'is-locked' : ''}`} key={item.id}>
+                      <article className={`line-item ${activeSegment === item.id ? 'is-current' : ''} ${!isSegmentSaved(item) && firstPendingId !== item.id ? 'is-locked' : ''} ${item.state === 'saving' ? 'is-saving' : ''}`} key={item.id}>
                         <button className="line-select" type="button" onClick={() => selectSegment(item.id)} aria-label={`Открыть реплику ${item.id}`} />
                         <span className="line-play" aria-hidden="true"><em>{item.id}</em><Play size={15} fill="currentColor" /></span>
                         <div className="line-copy"><span className="timecode">{formatTime(item.start)} — {formatTime(item.end)}</span><textarea rows={2} value={item.text} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()} onChange={(event) => updateText(item.id, event.target.value)} placeholder={transcriptionMode === 'transcribed' ? 'Проверьте текст' : 'Введите текст реплики'} aria-label={`Текст реплики ${item.id}`} /></div>
-                        <span className={`queue-state ${item.state === 'ready' ? 'is-ready' : item.state === 'pending' && firstPendingId === item.id ? 'is-next' : 'is-locked'}`}>{item.state === 'ready' ? <Check size={14} /> : item.state === 'pending' && firstPendingId === item.id ? <Mic size={13} /> : <LockKeyhole size={12} />}</span>
+                        <span className={`queue-state ${isSegmentSaved(item) ? 'is-ready' : firstPendingId === item.id ? 'is-next' : 'is-locked'}`}>{isSegmentSaved(item) ? <Check size={14} /> : item.state === 'saving' ? <span className="loader" /> : firstPendingId === item.id ? <Mic size={13} /> : <LockKeyhole size={12} />}</span>
                       </article>
                     ))}
                   </div>

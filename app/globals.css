@@ -786,6 +786,13 @@ h1 em { color: #397c5d; font-style: normal; }
 .studio-wizard .editor-footer .primary-button { min-width: 214px; }
 .studio-wizard .clip-picker > p { display: none; }
 .studio-wizard .legal-hint { max-width: 690px; line-height: 1.45; }
+.studio-wizard .page-heading,
+.studio-wizard .wizard-stepper { width: min(1120px, 100%); margin-left: auto; margin-right: auto; }
+.filmstrip > span.timeline-frame.is-loading { background: #17251e !important; }
+.recording-transcript { min-height: 0; max-height: 40px; overflow: hidden; margin: 5px 0 0; color: #dcebe0; font-size: .69rem; line-height: 1.35; }
+.recording-transcript span { display: inline-block; margin-right: 7px; color: #91a99a; font-family: var(--font-mono); font-size: .52rem; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
+.segment-queue .line-item.is-saving { border-color: rgba(199,244,92,.5); }
+.segment-queue .queue-state .loader { width: 12px; height: 12px; border-width: 2px; border-color: rgba(199,244,92,.24); border-top-color: var(--acid); }
 
 .studio-wizard.is-recording-stage .segment-queue { order: 1; }
 .studio-wizard.is-recording-stage .dub-console-header { padding-inline: 20px; }
@@ -809,4 +816,6 @@ h1 em { color: #397c5d; font-style: normal; }
   .studio-wizard.is-recording-stage .segment-queue-head { border-right: 0; }
   .studio-wizard.is-recording-stage .record-controls > button small { display: none; }
   .studio-wizard.is-recording-stage .record-controls > button { grid-template-columns: 26px minmax(0, 1fr); }
+  .recording-transcript { max-height: 31px; margin-top: 3px; font-size: .55rem; }
+  .recording-transcript span { font-size: .43rem; }
 }

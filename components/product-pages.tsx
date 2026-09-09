@@ -268,7 +268,7 @@ function AuthPage(props: PageProps) {
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
   const [error, setError] = useState('');
-  const [devCode, setDevCode] = useState('241806');
+  const [devCode, setDevCode] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const next = new URLSearchParams(props.route.split('?')[1] ?? '').get('next') || '/studio';
 
@@ -276,16 +276,16 @@ function AuthPage(props: PageProps) {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setError('Введите корректную почту'); return; }
     setSubmitting(true);
     try {
-      const result = await apiFetch<{ devCode: string }>('/auth/request-code', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) });
-      setDevCode(result.devCode);
+      const result = await apiFetch<{ devCode?: string }>('/auth/request-code', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) });
+      // A code is shown only by the loopback-only local development server.
+      // Production delivery happens by email and never reveals the OTP in UI.
+      setDevCode(result.devCode || null);
       setError('');
       setStep('code');
       props.notify('Код для входа готов.');
-    } catch {
-      setDevCode('241806');
-      setError('');
-      setStep('code');
-      props.notify('Не удалось отправить код. Попробуйте ещё раз.');
+    } catch (cause) {
+      setDevCode(null);
+      setError(cause instanceof Error ? cause.message : 'Не удалось отправить код. Попробуйте ещё раз.');
     } finally { setSubmitting(false); }
   }
 
@@ -298,13 +298,12 @@ function AuthPage(props: PageProps) {
       props.onSignedIn(email);
       props.navigate(next);
     } catch (cause) {
-      if (code === '241806') { props.onSignedIn(email); props.navigate(next); }
-      else setError(cause instanceof Error ? cause.message : 'Неверный код');
+      setError(cause instanceof Error ? cause.message : 'Неверный код');
     } finally { setSubmitting(false); }
   }
 
   function telegramLogin() {
-    props.onSignedIn('telegram@dublika.demo'); props.navigate(next);
+    props.notify('Вход через Telegram появится после подключения официального бота. Пока используйте код из письма.');
   }
 
   return (
@@ -332,7 +331,7 @@ function AuthPage(props: PageProps) {
               <InputOTP maxLength={6} value={code} onChange={setCode} containerClassName="otp-input">
                 <InputOTPGroup>{Array.from({ length: 6 }, (_, index) => <InputOTPSlot index={index} key={index} className="otp-slot" />)}</InputOTPGroup>
               </InputOTP>
-              <div className="demo-code"><BadgeCheck /> Код для входа: <strong>{devCode}</strong></div>
+              {devCode && <div className="demo-code"><BadgeCheck /> Код для локальной проверки: <strong>{devCode}</strong></div>}
               {error && <p className="auth-error">{error}</p>}
               <button className="auth-submit" type="button" disabled={submitting} onClick={() => void verify()}>{submitting ? 'Проверяем…' : 'Войти в Дублику'} <ArrowRight /></button>
               <button className="resend-button" type="button" onClick={() => void sendCode()}>Отправить код ещё раз</button>

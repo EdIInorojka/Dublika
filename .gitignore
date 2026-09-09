@@ -42,5 +42,6 @@ next-env.d.ts
 /work/
 /.local-data/
 /.local-bin/
+!.env.example
 
 .vercel

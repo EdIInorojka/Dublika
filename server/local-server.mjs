@@ -223,15 +223,49 @@ function actor(request) {
 
 const otpRequests = new Map();
 
+function isLoopbackOrigin(request) {
+  const origin = String(request.headers.origin || '');
+  return /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(origin);
+}
+
+async function deliverOtpEmail(email, code) {
+  const apiKey = String(process.env.RESEND_API_KEY || '').trim();
+  const from = String(process.env.OTP_FROM_EMAIL || '').trim();
+  if (!apiKey || !from) return false;
+  const result = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from,
+      to: [email],
+      subject: 'Код входа в Дублику',
+      text: `Ваш код входа: ${code}. Он действует 10 минут. Никому не сообщайте этот код.`,
+    }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!result.ok) throw new Error(`Не удалось отправить письмо (${result.status})`);
+  return true;
+}
+
 async function handleAuth(request, response, pathname) {
   if (pathname === '/api/auth/request-code' && request.method === 'POST') {
     const { email } = await readJson(request);
     const normalizedEmail = String(email || '').trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return sendJson(response, 400, { error: 'Некорректная почта' });
     const code = String(randomInt(100000, 999999));
+    const localPreview = isLoopbackOrigin(request);
+    let delivered = false;
+    try { delivered = await deliverOtpEmail(normalizedEmail, code); } catch (error) {
+      console.error(`[dublika] OTP delivery failed: ${String(error.message || error).slice(0, 500)}`);
+      return sendJson(response, 503, { error: 'Почтовая доставка временно недоступна. Попробуйте ещё раз позже.' });
+    }
+    if (!delivered && !localPreview) {
+      return sendJson(response, 503, { error: 'Почтовый вход ещё не подключён. Обратитесь в поддержку или откройте локальную версию для теста.' });
+    }
     otpRequests.set(normalizedEmail, { digest: createHash('sha256').update(code).digest('hex'), expiresAt: Date.now() + 10 * 60 * 1000, attempts: 0, deviceHash: deviceId(request) });
-    console.log(`[Дублика] Код входа для ${normalizedEmail}: ${code}`);
-    return sendJson(response, 200, { ok: true, devCode: code, expiresIn: 600 });
+    // Never log or return production OTPs.  The local loopback preview is the
+    // only development path that exposes a test code to make offline QA work.
+    return sendJson(response, 200, { ok: true, expiresIn: 600, ...(localPreview && !delivered ? { devCode: code } : {}) });
   }
   if (pathname === '/api/auth/verify-code' && request.method === 'POST') {
     const { email, code } = await readJson(request);
@@ -374,7 +408,10 @@ function stemCacheKey(project, clips) {
 async function extractSelectedAudio(project, clips, destination) {
   const filters = clips.map((clip, index) => {
     const clipDuration = Math.max(.04, clip.end - clip.start);
-    const fadeDuration = Math.min(.025, clipDuration / 2);
+    // A small fade on both sides prevents a discontinuity in the source
+    // waveform from becoming a click or a sudden loud pop between selected
+    // pieces.  It only touches the accompaniment before stem separation.
+    const fadeDuration = Math.min(.08, clipDuration / 3);
     return `[0:a]atrim=start=${clip.start}:end=${clip.end},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${fadeDuration},afade=t=out:st=${Math.max(0, clipDuration - fadeDuration)}:d=${fadeDuration}[clip${index}]`;
   });
   filters.push(`${clips.map((_, index) => `[clip${index}]`).join('')}concat=n=${clips.length}:v=0:a=1,aresample=44100,aformat=channel_layouts=stereo[audio]`);
@@ -747,23 +784,34 @@ async function analyzeProject(project, body) {
   // timeline below. This avoids making a person wait for one Deepgram request
   // after another when they picked several pieces from the source video.
   const analyses = await Promise.all(clips.map(async (clip) => {
-    let segments = await transcribeWithDeepgram(project.inputPath, clip.start, clip.end);
+    let segments = null;
+    let transcriptionUnavailable = false;
+    try {
+      segments = await transcribeWithDeepgram(project.inputPath, clip.start, clip.end);
+    } catch (error) {
+      // An expired key or a temporarily blocked Deepgram connection must not
+      // destroy the entire editing session.  We still create honest, empty
+      // timed recording windows from the selected source audio.
+      transcriptionUnavailable = true;
+      console.error(`[dublika] transcription unavailable for ${project.id}: ${String(error.message || error).slice(-700)}`);
+    }
     let transcribed = Boolean(segments?.length);
     let noSpeech = false;
     if (!segments?.length) {
-      noSpeech = deepgramKeyState().valid;
+      noSpeech = deepgramKeyState().valid && !transcriptionUnavailable;
       let log = '';
       try { log = await runFfmpeg(['-hide_banner', '-ss', String(clip.start), '-t', String(clip.end - clip.start), '-i', project.inputPath, '-vn', '-af', 'silencedetect=noise=-32dB:d=0.32', '-f', 'null', '-']); } catch (error) { log = String(error.message || ''); }
       segments = manualSegments(clip.start, clip.end, log);
       transcribed = false;
     }
-    return { clip, segments, transcribed, noSpeech };
+    return { clip, segments, transcribed, noSpeech, transcriptionUnavailable };
   }));
 
   const collected = [];
   let outputOffset = 0;
   const allTranscribed = analyses.every((analysis) => analysis.transcribed);
   const onlyNoSpeech = analyses.every((analysis) => !analysis.transcribed && analysis.noSpeech);
+  const hadUnavailableTranscription = analyses.some((analysis) => analysis.transcriptionUnavailable);
   for (const { clip, segments } of analyses) {
     for (const segment of segments) {
       const start = rounded(segment.start);
@@ -782,8 +830,16 @@ async function analyzeProject(project, body) {
     outputOffset += clip.end - clip.start;
   }
   project.segments = collected;
+  // A new selection changes the flattened timeline.  Reusing takes by their
+  // old numeric ids could lay a voice over the wrong phrase, so analysis is a
+  // hard edit boundary: the user records the refreshed cues from scratch.
+  project.recordings = {};
+  project.outputPath = null;
+  project.outputUrl = null;
+  project.error = null;
+  project.progress = 0;
   const transcriptionMode = allTranscribed ? 'transcribed' : 'manual';
-  const transcriptionReason = allTranscribed ? null : onlyNoSpeech ? 'no_speech' : 'unavailable';
+  const transcriptionReason = allTranscribed ? null : onlyNoSpeech ? 'no_speech' : hadUnavailableTranscription ? 'unavailable' : 'no_speech';
   project.transcriptionMode = transcriptionMode;
   project.waveforms = {};
   project.status = 'ready';
@@ -795,7 +851,10 @@ async function analyzeProject(project, body) {
 
 async function renderProject(user, project) {
   if (user.credits <= 0 && user.plan === 'Пробный') throw new Error('Бесплатные обработки закончились');
-  const recorded = project.segments.filter((segment) => project.recordings?.[segment.id]);
+  const expectedSegments = [...project.segments].sort((left, right) => (left.outputStart ?? left.start) - (right.outputStart ?? right.start));
+  const missing = expectedSegments.filter((segment) => !project.recordings?.[segment.id]);
+  if (missing.length) throw new Error(`Сначала сохраните все реплики. Не записано: ${missing.map((segment) => segment.id).join(', ')}`);
+  const recorded = expectedSegments;
   if (!recorded.length) throw new Error('Запишите хотя бы одну реплику');
   const clips = projectClips(project);
   if (!clips.length) throw new Error('Сначала выберите хотя бы один фрагмент');
@@ -830,17 +889,21 @@ async function renderProject(user, project) {
     // safety margin. It must never bleed into the next cue in the export.
     // A short fade removes the click that arose when WebM takes met exactly
     // at a segment boundary.
-    const edgeFade = Math.min(.045, spokenDuration / 4);
+    const edgeFade = Math.min(.07, spokenDuration / 4);
     const fadeOutAt = Math.max(0, spokenDuration - edgeFade);
-    filters.push(`[${firstTakeInput + index}:a]highpass=f=80,lowpass=f=12000,afftdn=nf=-25,acompressor=threshold=-20dB:ratio=3:attack=12:release=150:makeup=2,atrim=start=${leadIn.toFixed(3)}:end=${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${edgeFade.toFixed(3)},afade=t=out:st=${fadeOutAt.toFixed(3)}:d=${edgeFade.toFixed(3)},volume=.9,adelay=${delay}:all=1[t${index}]`);
+    filters.push(`[${firstTakeInput + index}:a]highpass=f=80,lowpass=f=12000,afftdn=nf=-25,acompressor=threshold=-20dB:ratio=3:attack=12:release=150:makeup=2,atrim=start=${leadIn.toFixed(3)}:end=${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${edgeFade.toFixed(3)},afade=t=out:st=${fadeOutAt.toFixed(3)}:d=${edgeFade.toFixed(3)},volume=.82,adelay=${delay}:all=1[t${index}]`);
   });
   const takeLabels = recorded.map((_, index) => `[t${index}]`).join('');
-  filters.push(`${takeLabels}amix=inputs=${recorded.length}:normalize=0:dropout_transition=0,alimiter=limit=.88[voice]`);
+  // Every take is delayed onto its one flattened output timeline.  Because
+  // they are validated as separate cues this produces one voice track rather
+  // than stacking takes at clip boundaries.  The limiter is a final safety
+  // net, not a gain boost, so adjacent lines cannot produce a volume burst.
+  filters.push(`${takeLabels}amix=inputs=${recorded.length}:duration=longest:normalize=0:dropout_transition=0,alimiter=limit=.76[voice]`);
   if (accompanimentPath) {
     filters.push(`[1:a]atrim=duration=${duration},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=.96[effects]`);
     filters.push('[voice]asplit=2[voice_sc][voice_mix]');
     filters.push('[effects][voice_sc]sidechaincompress=threshold=.024:ratio=6:attack=15:release=260[ducked]');
-    filters.push("[ducked][voice_mix]amix=inputs=2:normalize=0:dropout_transition=0:weights='0.9 1.06',alimiter=limit=.92[aout]");
+    filters.push("[ducked][voice_mix]amix=inputs=2:duration=first:normalize=0:dropout_transition=0:weights='0.72 1',alimiter=limit=.82[aout]");
   } else {
     filters.push('[voice]anull[aout]');
   }
@@ -914,7 +977,10 @@ async function downloadRemote(value, destination) {
     // Some Windows security profiles permit the isolated downloader but block
     // Node's network stack. Keep direct MP4 links usable in that environment
     // by falling back to the same sandboxed yt-dlp worker used for platforms.
-    try { return await downloadWithYtDlp(value, destination, false); } catch { throw error; }
+    try { return await downloadWithYtDlp(value, destination, false); } catch {
+      console.error(`[dublika] direct import failed: ${String(error.message || error).slice(-800)}`);
+      throw badRequest('Не удалось загрузить видео по ссылке. Проверьте, что ссылка открывается без авторизации, или загрузите файл с устройства.');
+    }
   }
 }
 
@@ -926,7 +992,13 @@ async function downloadWithYtDlp(value, destination, platform) {
   // YouTube increasingly requires its player JavaScript while negotiating
   // formats. Pinning the already-installed Node runtime prevents yt-dlp from
   // silently falling back to its incomplete no-JS extractor.
-  await runProcess(ytDlpPath, ['--no-playlist', '--no-warnings', '--no-part', '--max-filesize', '1G', '--js-runtimes', 'node', '--format', format, '--merge-output-format', 'mp4', '--ffmpeg-location', ffmpegDirectory, '--output', destination, url.toString()]);
+  try {
+    await runProcess(ytDlpPath, ['--no-playlist', '--no-warnings', '--no-part', '--max-filesize', '1G', '--js-runtimes', 'node', '--format', format, '--merge-output-format', 'mp4', '--ffmpeg-location', ffmpegDirectory, '--output', destination, url.toString()]);
+  } catch (error) {
+    try { unlinkSync(destination); } catch { /* a partial download is never reused */ }
+    console.error(`[dublika] platform import failed: ${String(error.message || error).slice(-1600)}`);
+    throw badRequest('Не удалось получить видео из YouTube или VK. Проверьте публичный доступ к ролику или загрузите файл с устройства.');
+  }
   if (!existsSync(destination)) throw new Error('Видео не было сохранено');
   return statSync(destination).size;
 }
