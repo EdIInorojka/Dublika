@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, randomInt, randomUUID, timingSafeE
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { lookup } from 'node:dns/promises';
 import { createServer } from 'node:http';
-import { extname, join, normalize, resolve } from 'node:path';
+import { basename, extname, join, normalize, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { spawn } from 'node:child_process';
@@ -15,7 +15,10 @@ const dataDir = join(root, '.local-data');
 const uploadDir = join(dataDir, 'uploads');
 const recordingDir = join(dataDir, 'recordings');
 const outputDir = join(dataDir, 'outputs');
+const stemsDir = join(dataDir, 'stems');
 const ytDlpPath = join(root, '.local-bin', 'yt-dlp.exe');
+const demucsPythonPath = process.env.DUBLIKA_DEMUCS_PYTHON || join(root, '.local-bin', 'demucs-venv', 'Scripts', 'python.exe');
+const demucsModel = process.env.DUBLIKA_DEMUCS_MODEL || 'htdemucs';
 const deepgramKeyPath = join(root, 'ключ.txt');
 const productionStatePath = join(dataDir, 'state.json');
 const sandboxStatePath = join(dataDir, 'test-state.json');
@@ -43,7 +46,7 @@ const allowedOrigins = new Set([
   ...String(process.env.DUBLIKA_ALLOWED_ORIGINS || '').split(',').map((origin) => origin.trim()).filter(Boolean),
 ]);
 
-for (const directory of [dataDir, uploadDir, recordingDir, outputDir]) mkdirSync(directory, { recursive: true });
+for (const directory of [dataDir, uploadDir, recordingDir, outputDir, stemsDir]) mkdirSync(directory, { recursive: true });
 
 function initialState() {
   return { secret: randomBytes(32).toString('hex'), users: {}, devices: {}, projects: {} };
@@ -293,11 +296,11 @@ function runFfmpegBuffer(argumentsList, maximumBytes = 1024 * 1024) {
   });
 }
 
-function runProcess(executable, argumentsList, timeoutMs = 15 * 60 * 1000) {
+function runProcess(executable, argumentsList, timeoutMs = 15 * 60 * 1000, label = 'Обработка') {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(executable, argumentsList, { windowsHide: true });
     let output = '';
-    const timer = setTimeout(() => { child.kill(); rejectRun(new Error('Импорт занял слишком много времени')); }, timeoutMs);
+    const timer = setTimeout(() => { child.kill(); rejectRun(new Error(`${label} заняла слишком много времени`)); }, timeoutMs);
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk) => { output = `${output}${chunk}`.slice(-120000); });
@@ -306,13 +309,68 @@ function runProcess(executable, argumentsList, timeoutMs = 15 * 60 * 1000) {
     child.on('close', (code) => {
       clearTimeout(timer);
       if (code === 0) resolveRun(output);
-      else rejectRun(new Error(output.slice(-2500) || `yt-dlp exited ${code}`));
+      else rejectRun(new Error(output.slice(-2500) || `${label} завершилась с кодом ${code}`));
     });
   });
 }
 
 async function sourceHasAudio(path) {
   try { await runFfmpeg(['-hide_banner', '-i', path, '-map', '0:a:0', '-t', '0.1', '-f', 'null', '-']); return true; } catch { return false; }
+}
+
+function stemCacheKey(project, clips) {
+  const source = statSync(project.inputPath);
+  return createHash('sha256')
+    .update(JSON.stringify({ input: project.inputPath, size: source.size, modified: source.mtimeMs, clips }))
+    .digest('hex')
+    .slice(0, 20);
+}
+
+async function extractSelectedAudio(project, clips, destination) {
+  const filters = clips.map((clip, index) => {
+    const clipDuration = Math.max(.04, clip.end - clip.start);
+    const fadeDuration = Math.min(.025, clipDuration / 2);
+    return `[0:a]atrim=start=${clip.start}:end=${clip.end},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${fadeDuration},afade=t=out:st=${Math.max(0, clipDuration - fadeDuration)}:d=${fadeDuration}[clip${index}]`;
+  });
+  filters.push(`${clips.map((_, index) => `[clip${index}]`).join('')}concat=n=${clips.length}:v=0:a=1,aresample=44100,aformat=channel_layouts=stereo[audio]`);
+  await runFfmpeg(['-y', '-i', project.inputPath, '-filter_complex', filters.join(';'), '-map', '[audio]', '-c:a', 'pcm_s16le', destination]);
+}
+
+async function prepareAccompaniment(project, clips) {
+  if (!existsSync(demucsPythonPath)) {
+    throw new Error('AI-разделение звука не установлено на сервере. Запустите scripts/setup-demucs.ps1 и повторите рендер.');
+  }
+  const cacheKey = stemCacheKey(project, clips);
+  if (project.accompaniment?.key === cacheKey && existsSync(project.accompaniment.path)) return project.accompaniment.path;
+
+  const workspace = join(stemsDir, project.id);
+  const sourceAudioPath = join(workspace, `scene-${cacheKey}.wav`);
+  const outputRoot = join(workspace, 'demucs');
+  mkdirSync(workspace, { recursive: true });
+  project.progress = 8;
+  saveState();
+  await extractSelectedAudio(project, clips, sourceAudioPath);
+
+  project.progress = 16;
+  saveState();
+  // `--two-stems=vocals` writes a dedicated no_vocals.wav accompaniment.
+  // This is the only background that reaches the final mix: never a simple
+  // mid/side subtraction of the original dialogue.
+  await runProcess(
+    demucsPythonPath,
+    ['-m', 'demucs.separate', '--name', demucsModel, '--two-stems=vocals', '--device=cpu', '--segment=7', '--out', outputRoot, sourceAudioPath],
+    20 * 60 * 1000,
+    'AI-разделение звука',
+  );
+  const trackName = basename(sourceAudioPath, extname(sourceAudioPath));
+  const accompanimentPath = join(outputRoot, demucsModel, trackName, 'no_vocals.wav');
+  if (!existsSync(accompanimentPath) || statSync(accompanimentPath).size < 1024) {
+    throw new Error('AI-разделение не вернуло дорожку музыки и эффектов. Финальное видео не собрано, чтобы не вернуть исходный голос.');
+  }
+  project.accompaniment = { key: cacheKey, path: accompanimentPath, model: demucsModel, createdAt: new Date().toISOString() };
+  project.progress = 50;
+  saveState();
+  return accompanimentPath;
 }
 
 async function waveformForRange(project, start, end) {
@@ -677,26 +735,23 @@ async function renderProject(user, project) {
   if (!clips.length) throw new Error('Сначала выберите хотя бы один фрагмент');
   const duration = clips.reduce((total, clip) => total + clip.end - clip.start, 0);
   const outputPath = join(outputDir, `${project.id}.mp4`);
+  project.status = 'processing';
+  project.progress = 2;
+  project.error = null;
+  saveState();
   // Use one source input and exact trim filters. Input-side seeking can begin
   // at a non-keyframe and was causing clicks/pops where selected pieces met.
   const args = ['-y', '-i', project.inputPath];
-  recorded.forEach((segment) => args.push('-i', project.recordings[segment.id].path));
   const filters = [];
   const sourceHasSound = await sourceHasAudio(project.inputPath);
+  const accompanimentPath = sourceHasSound ? await prepareAccompaniment(project, clips) : null;
+  if (accompanimentPath) args.push('-i', accompanimentPath);
+  recorded.forEach((segment) => args.push('-i', project.recordings[segment.id].path));
   const sourceVideoLabels = clips.map((clip, index) => `[0:v]trim=start=${clip.start}:end=${clip.end},setpts=PTS-STARTPTS[v${index}]`);
   filters.push(...sourceVideoLabels);
   const sourceVideoLabel = '[vsource]';
-  if (sourceHasSound) {
-    clips.forEach((clip, index) => {
-      const clipDuration = Math.max(.04, clip.end - clip.start);
-      const fadeDuration = Math.min(.025, clipDuration / 2);
-      filters.push(`[0:a]atrim=start=${clip.start}:end=${clip.end},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${fadeDuration},afade=t=out:st=${Math.max(0, clipDuration - fadeDuration)}:d=${fadeDuration}[a${index}]`);
-    });
-    const concatInputs = clips.map((_, index) => `[v${index}][a${index}]`).join('');
-    filters.push(`${concatInputs}concat=n=${clips.length}:v=1:a=1[vsource][original]`);
-  } else {
-    filters.push(`${clips.map((_, index) => `[v${index}]`).join('')}concat=n=${clips.length}:v=1:a=0[vsource]`);
-  }
+  filters.push(`${clips.map((_, index) => `[v${index}]`).join('')}concat=n=${clips.length}:v=1:a=0[vsource]`);
+  const firstTakeInput = accompanimentPath ? 2 : 1;
   recorded.forEach((segment, index) => {
     const take = project.recordings[segment.id];
     // Recordings made before this feature have no padding metadata and remain
@@ -711,31 +766,23 @@ async function renderProject(user, project) {
     // at a segment boundary.
     const edgeFade = Math.min(.045, spokenDuration / 4);
     const fadeOutAt = Math.max(0, spokenDuration - edgeFade);
-    filters.push(`[${1 + index}:a]highpass=f=80,lowpass=f=12000,afftdn=nf=-25,acompressor=threshold=-20dB:ratio=3:attack=12:release=150:makeup=2,atrim=start=${leadIn.toFixed(3)}:end=${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${edgeFade.toFixed(3)},afade=t=out:st=${fadeOutAt.toFixed(3)}:d=${edgeFade.toFixed(3)},volume=.9,adelay=${delay}:all=1[t${index}]`);
+    filters.push(`[${firstTakeInput + index}:a]highpass=f=80,lowpass=f=12000,afftdn=nf=-25,acompressor=threshold=-20dB:ratio=3:attack=12:release=150:makeup=2,atrim=start=${leadIn.toFixed(3)}:end=${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${edgeFade.toFixed(3)},afade=t=out:st=${fadeOutAt.toFixed(3)}:d=${edgeFade.toFixed(3)},volume=.9,adelay=${delay}:all=1[t${index}]`);
   });
   const takeLabels = recorded.map((_, index) => `[t${index}]`).join('');
   filters.push(`${takeLabels}amix=inputs=${recorded.length}:normalize=0:dropout_transition=0,alimiter=limit=.88[voice]`);
-  if (sourceHasSound) {
-    // Speech is typically centred, but fully subtracting the mid channel also
-    // erased centre-panned ambience and effects. This gentler matrix keeps
-    // those layers while substantially reducing the original dialogue before
-    // the new take ducks the remaining speech.
-    filters.push('[original]aformat=channel_layouts=stereo,pan=stereo|c0=.78*c0-.46*c1|c1=.78*c1-.46*c0,volume=.92[effects]');
+  if (accompanimentPath) {
+    filters.push(`[1:a]atrim=duration=${duration},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=.96[effects]`);
     filters.push('[voice]asplit=2[voice_sc][voice_mix]');
-    filters.push('[effects][voice_sc]sidechaincompress=threshold=.022:ratio=8:attack=12:release=220[ducked]');
-    filters.push("[ducked][voice_mix]amix=inputs=2:normalize=0:dropout_transition=0:weights='0.82 1.08',alimiter=limit=.92[aout]");
+    filters.push('[effects][voice_sc]sidechaincompress=threshold=.024:ratio=6:attack=15:release=260[ducked]');
+    filters.push("[ducked][voice_mix]amix=inputs=2:normalize=0:dropout_transition=0:weights='0.9 1.06',alimiter=limit=.92[aout]");
   } else {
     filters.push('[voice]anull[aout]');
   }
   args.push('-filter_complex', filters.join(';'));
   args.push('-map', sourceVideoLabel, '-map', '[aout]', '-c:v', 'libx264', '-preset', 'superfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-b:a', '160k', '-t', String(duration), '-movflags', '+faststart', '-max_muxing_queue_size', '2048', '-progress', 'pipe:2', '-nostats', outputPath);
-  project.status = 'processing';
-  project.progress = 1;
-  project.error = null;
-  saveState();
   await runFfmpeg(args, (chunk) => {
     const match = String(chunk).match(/out_time_ms=(\d+)/);
-    if (match) project.progress = Math.min(99, Math.round((Number(match[1]) / 1_000_000) / duration * 100));
+    if (match) project.progress = Math.min(99, 55 + Math.round((Number(match[1]) / 1_000_000) / duration * 44));
   });
   project.status = 'done';
   project.progress = 100;
@@ -828,6 +875,8 @@ async function handleApi(request, response, url) {
   if (pathname === '/api/health') return sendJson(response, 200, {
     ok: true,
     ffmpeg: Boolean(ffmpegPath && existsSync(ffmpegPath)),
+    stemSeparation: existsSync(demucsPythonPath),
+    stemModel: demucsModel,
     ytDlp: existsSync(ytDlpPath),
     transcription: deepgram.valid,
     transcriptionProvider: 'deepgram',
@@ -869,7 +918,7 @@ async function handleApi(request, response, url) {
 
   if (pathname === '/api/projects' && request.method === 'GET') {
     const user = actor(request);
-    const projects = Object.values(state.projects).filter((project) => project.userId === user.id).map(({ inputPath: _input, outputPath: _output, recordings: _recordings, ...project }) => ({
+    const projects = Object.values(state.projects).filter((project) => project.userId === user.id).map(({ inputPath: _input, outputPath: _output, recordings: _recordings, accompaniment: _accompaniment, ...project }) => ({
       ...project,
       inputUrl: sourceMediaUrl(project),
       outputUrl: project.outputUrl ? outputMediaUrl(project) : null,
@@ -897,7 +946,7 @@ async function handleApi(request, response, url) {
   const wantsWaveform = Boolean(projectMatch[4]);
 
   if (!action && !Number.isFinite(segmentId) && request.method === 'GET') {
-    const { inputPath: _input, outputPath: _output, recordings, ...safeProject } = project;
+    const { inputPath: _input, outputPath: _output, recordings, accompaniment: _accompaniment, ...safeProject } = project;
     const segments = project.segments.map((segment) => recordings?.[segment.id] ? { ...segment, audioUrl: takeMediaUrl(project, segment.id) } : segment);
     return sendJson(response, 200, { project: { ...safeProject, segments, inputUrl: sourceMediaUrl(project), outputUrl: project.outputUrl ? outputMediaUrl(project) : null }, credits: user.credits });
   }

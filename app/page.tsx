@@ -1177,7 +1177,7 @@ export default function Home() {
           setResultUrl(mediaUrl(status.outputUrl));
           setCredits(status.credits);
           window.localStorage.setItem('dublika-credits', String(status.credits));
-          setMessage('Готово: фрагменты склеены, голос очищен, исходная речь подавлена, MP4 собран.');
+          setMessage('Готово: фрагменты склеены, исходная речь отделена AI, музыка и эффекты сведены с вашим дублем. MP4 собран.');
           navigate(`/studio?project=${projectId}&view=result`);
           return;
         }
@@ -1275,7 +1275,7 @@ export default function Home() {
             <div className="studio-result-copy">
               <p className="eyebrow"><span /> результат</p>
               <h1>Видео собрано.<br /><em>Можно публиковать.</em></h1>
-              <p>Ваш голос выровнен, исходная речь приглушена. Субтитры в файл не добавлялись.</p>
+              <p>Ваш голос выровнен. AI отделил исходную речь от музыки и эффектов; субтитры в файл не добавлялись.</p>
             </div>
             <div className="studio-result-player">
               <video src={resultUrl} controls playsInline />
@@ -1374,7 +1374,7 @@ export default function Home() {
                 </div>
               </div>
               <div className="editor-footer">
-                <div className="quality-note"><WandSparkles size={18} /><p><strong>Умная обработка</strong><span>Приглушим оригинал под дублем и сохраним фон</span></p></div>
+                <div className="quality-note"><WandSparkles size={18} /><p><strong>AI-разделение звука</strong><span>Отделим исходную речь и сохраним музыку с эффектами</span></p></div>
                 <button className="primary-button" type="button" onClick={() => void analyzeClip()} disabled={!sourceReady || analyzing || uploading}>{analyzing ? <><span className="loader" /> Анализируем…</> : uploading ? 'Сохраняем видео…' : <>Подготовить реплики <ArrowRight size={18} /></>}</button>
               </div>
             </section>}
@@ -1444,7 +1444,7 @@ export default function Home() {
                 <div><span><Music2 size={17} /> Фоновая музыка</span><strong>Сохранить <Check size={14} /></strong></div>
                 <div><span><BadgeCheck size={17} /> Качество</span><strong>Full HD <ChevronDown size={14} /></strong></div>
               </div>
-              {assembly === 'processing' && <div className="render-state"><div><span>Собираем видео</span><strong>{assemblyProgress}%</strong></div><Progress value={assemblyProgress} /><small>Сводим голос и звуковой фон</small></div>}
+              {assembly === 'processing' && <div className="render-state"><div><span>Собираем видео</span><strong>{assemblyProgress}%</strong></div><Progress value={assemblyProgress} /><small>{assemblyProgress < 55 ? 'AI отделяет речь от музыки и эффектов' : 'Сводим ваш голос с очищенным фоном'}</small></div>}
               {assembly === 'done' ? <button className="download-button" type="button" onClick={downloadResult}><Download size={18} /> Скачать результат</button> : <button className="assemble-button" type="button" disabled={assembly === 'processing' || !allSegmentsFinished} onClick={assembleVideo}><Sparkles size={18} /> {assembly === 'processing' ? 'Обрабатываем…' : allSegmentsFinished ? 'Собрать видео' : `Осталось реплик: ${pendingSegments}`}</button>}
               <p className="price-line"><span>{plan === 'Пробный' ? 'Три обработки бесплатно' : `Тариф «${plan}» активен`}</span><ShieldCheck size={14} /> Без водяного знака</p>
             </section>
