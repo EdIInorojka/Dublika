@@ -19,10 +19,17 @@ function deviceId() {
   return value;
 }
 
+function isQaSession() {
+  return new URLSearchParams(window.location.search).get('dublika-qa') === '1';
+}
+
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = window.localStorage.getItem('dublika-token');
   const headers = new Headers(init.headers);
   headers.set('X-Device-Id', deviceId());
+  // Local QA can be pointed at a fully isolated data realm without creating
+  // accounts or projects in the customer database.
+  if (isQaSession()) headers.set('X-Dublika-Environment', 'test');
   if (token) headers.set('Authorization', `Bearer ${token}`);
   const response = await fetch(`${apiOrigin()}/api${path}`, { ...init, headers });
   const contentType = response.headers.get('content-type') || '';

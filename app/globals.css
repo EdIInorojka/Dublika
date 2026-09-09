@@ -664,3 +664,104 @@ h1 em { color: #397c5d; font-style: normal; }
   .studio-app-shell.is-recording-stage .segment-queue { flex-basis: 62px; min-height: 62px; padding-block: 6px; }
   .studio-app-shell.is-recording-stage .segment-queue .line-item { min-height: 43px; }
 }
+
+/* Studio v4: one task per screen.  The recording room is intentionally a
+   fixed workstation — no side rail, no nested page and no auxiliary cards. */
+.studio-wizard .workspace-grid { grid-template-columns: minmax(0, 1fr); }
+.studio-wizard .workspace-aside { display: none; }
+.studio-wizard .workspace-main { width: min(1120px, 100%); margin: 0 auto; }
+.studio-wizard .wizard-panel { min-height: min(620px, calc(100dvh - 210px)); }
+.wizard-stepper { grid-template-columns: auto repeat(4, minmax(0, 1fr)); gap: 14px; padding: 0; }
+.wizard-stepper .step { grid-template-columns: auto auto minmax(12px, 1fr); }
+.wizard-stepper .step:last-child { grid-template-columns: auto auto; }
+.wizard-stepper .step.is-current { color: var(--ink); }
+.wizard-stepper .step.is-current .step-dot { border-color: var(--ink); background: var(--ink); color: var(--acid); box-shadow: 0 0 0 4px rgba(22,56,44,.06); }
+.wizard-stepper .step.is-complete { color: #4d775c; }
+.wizard-stepper .step.is-complete .step-dot { border-color: #7bb985; background: #e4f4df; color: #39764d; }
+.wizard-stepper .step.is-complete i { background: #91bd94; }
+.wizard-back { min-height: 32px; align-self: center; padding: 0 10px; border: 1px solid #d8dfd8; border-radius: 9px; background: #fff; color: #4d5d55; font-size: .7rem; font-weight: 750; cursor: pointer; }
+.wizard-back:hover { border-color: #7da588; color: var(--ink); }
+
+.cue-review-card { display: flex; flex-direction: column; }
+.cue-review-list { min-height: 0; display: grid; gap: 8px; max-height: min(54dvh, 510px); overflow: auto; padding-right: 4px; }
+.cue-review-row { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 12px; align-items: start; padding: 11px 12px; border: 1px solid #dfe5df; border-radius: 13px; background: #f8faf7; }
+.cue-review-row > span { display: flex; flex-direction: column; gap: 4px; padding-top: 3px; }
+.cue-review-row b { color: #315d48; font-family: var(--font-mono); font-size: .66rem; }
+.cue-review-row small { color: #849087; font-family: var(--font-mono); font-size: .59rem; }
+.cue-review-row textarea { width: 100%; min-height: 50px; border: 0; outline: 0; resize: vertical; background: transparent; color: var(--ink); font: inherit; font-size: .86rem; font-weight: 650; line-height: 1.4; }
+.cue-review-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 15px; padding-top: 15px; border-top: 1px solid #e0e5df; color: #6e7e74; font-size: .72rem; }
+.cue-review-footer > span { display: inline-flex; align-items: center; gap: 7px; }
+.cue-review-footer > span svg { color: #4b9d63; }
+
+.studio-wizard.is-recording-stage .main-area { width: min(1280px, calc(100% - 32px)); height: calc(100dvh - 72px); min-height: 0; display: flex; flex-direction: column; padding: 14px 0; overflow: hidden; box-sizing: border-box; }
+.studio-wizard.is-recording-stage .page-heading { display: none; }
+.studio-wizard.is-recording-stage .wizard-stepper { flex: 0 0 auto; margin: 0 0 10px; }
+.studio-wizard.is-recording-stage .workspace-grid,
+.studio-wizard.is-recording-stage .workspace-main { flex: 1; min-height: 0; display: block; }
+.studio-wizard.is-recording-stage .dub-console-card { height: 100%; display: flex; flex-direction: column; overflow: hidden; padding: 0; border-color: #24372d; border-radius: 20px; }
+.studio-wizard.is-recording-stage .dub-console-header { flex: 0 0 auto; min-height: 64px; margin: 0; padding: 12px 16px; border-bottom: 1px solid #25372d; }
+.studio-wizard.is-recording-stage .dub-console-header p { margin-top: 1px; }
+.studio-wizard.is-recording-stage .dub-console { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.studio-wizard.is-recording-stage .segment-queue { order: -1; flex: 0 0 92px; min-height: 92px; display: flex; align-items: center; gap: 9px; overflow: hidden; padding: 9px 16px; border-top: 0; border-bottom: 1px solid #293b31; }
+.studio-wizard.is-recording-stage .segment-queue-head { flex: 0 0 132px; gap: 5px; padding: 0 8px 0 0; }
+.studio-wizard.is-recording-stage .segment-queue-head > div:first-child { font-size: .62rem; }
+.studio-wizard.is-recording-stage .segment-queue-slider { padding: 1px 0; }
+.studio-wizard.is-recording-stage .segment-queue-scale { display: none; }
+.studio-wizard.is-recording-stage .segment-queue .line-item { flex: 0 0 44px; min-height: 58px; display: grid; grid-template-columns: 1fr; place-items: center; gap: 2px; margin: 0; padding: 4px 2px; border-radius: 10px; }
+.studio-wizard.is-recording-stage .segment-queue .line-copy { display: none; }
+.studio-wizard.is-recording-stage .segment-queue .line-play { width: 27px; height: 27px; }
+.studio-wizard.is-recording-stage .segment-queue .line-play svg { display: none; }
+.studio-wizard.is-recording-stage .segment-queue .line-play em { display: block; }
+.studio-wizard.is-recording-stage .segment-queue .queue-state { width: 15px; height: 15px; margin: 0; border-radius: 5px; }
+.studio-wizard.is-recording-stage .segment-queue .queue-state svg { width: 9px; }
+.studio-wizard.is-recording-stage .dub-workbench { flex: 1; min-height: 0; display: grid; grid-template-rows: minmax(180px, 1fr) auto auto auto auto; gap: 0; padding: 12px 16px 14px; overflow: hidden; }
+.studio-wizard.is-recording-stage .segment-video-wrap { min-height: 180px; height: auto; }
+.studio-wizard.is-recording-stage .segment-video-wrap video { width: 100%; height: 100%; max-height: none; object-fit: contain; }
+.studio-wizard.is-recording-stage .active-caption { padding: 9px 0 7px; }
+.studio-wizard.is-recording-stage .active-caption textarea { min-height: 44px; max-height: 58px; resize: none; font-size: .92rem; }
+.studio-wizard.is-recording-stage .wave-compare-head { padding: 6px 0; }
+.studio-wizard.is-recording-stage .live-wave-shell { height: clamp(76px, 13vh, 116px); border-radius: 10px; }
+.studio-wizard.is-recording-stage .record-limit { margin-top: 7px; padding: 7px 10px; }
+.studio-wizard.is-recording-stage .record-controls { margin-top: 8px; padding: 0; grid-template-columns: 1.25fr 1fr 1fr; }
+.studio-wizard.is-recording-stage .record-controls > button { min-height: 62px; }
+
+@media (max-width: 720px) {
+  .studio-wizard .wizard-panel { min-height: auto; }
+  .wizard-stepper { grid-template-columns: auto repeat(4, minmax(0, 1fr)); gap: 4px; }
+  .wizard-stepper .step { grid-template-columns: 1fr; justify-items: center; gap: 3px; font-size: .48rem; text-align: center; }
+  .wizard-stepper .step i { display: none; }
+  .wizard-stepper .step-dot { width: 25px; height: 25px; font-size: .56rem; }
+  .wizard-back { min-height: 28px; padding: 0 7px; font-size: .6rem; }
+  .cue-review-row { grid-template-columns: 1fr; gap: 6px; }
+  .cue-review-row > span { flex-direction: row; align-items: center; justify-content: space-between; }
+  .cue-review-footer { align-items: stretch; flex-direction: column; }
+  .cue-review-footer .primary-button { width: 100%; }
+
+  .studio-wizard.is-recording-stage .topbar { display: none; }
+  .studio-wizard.is-recording-stage .main-area { width: 100%; height: 100dvh; padding: 7px 8px; }
+  .studio-wizard.is-recording-stage .wizard-stepper { display: grid; flex: 0 0 38px; margin: 0 0 5px; }
+  .studio-wizard.is-recording-stage .dub-console-card { border-radius: 14px; }
+  .studio-wizard.is-recording-stage .dub-console-header { min-height: 48px; padding: 7px 10px; }
+  .studio-wizard.is-recording-stage .dub-console-header p { display: none; }
+  .studio-wizard.is-recording-stage .dub-console-header h2 { font-size: .82rem; }
+  .studio-wizard.is-recording-stage .dub-console-header .section-index { width: 32px; height: 32px; }
+  .studio-wizard.is-recording-stage .segment-queue { flex-basis: 61px; min-height: 61px; gap: 6px; padding: 6px 9px; }
+  .studio-wizard.is-recording-stage .segment-queue-head { flex-basis: 72px; }
+  .studio-wizard.is-recording-stage .segment-queue-head > div:first-child { gap: 3px; font-size: .5rem; }
+  .studio-wizard.is-recording-stage .segment-queue .line-item { flex-basis: 39px; min-height: 47px; }
+  .studio-wizard.is-recording-stage .segment-queue .line-play { width: 24px; height: 24px; }
+  .studio-wizard.is-recording-stage .dub-workbench { grid-template-rows: minmax(126px, 1fr) auto auto auto auto; padding: 7px 9px 9px; }
+  .studio-wizard.is-recording-stage .segment-video-wrap { min-height: 126px; }
+  .studio-wizard.is-recording-stage .active-caption { padding: 5px 0; }
+  .studio-wizard.is-recording-stage .active-caption span { font-size: .48rem; }
+  .studio-wizard.is-recording-stage .active-caption textarea { min-height: 38px; max-height: 45px; font-size: .72rem; }
+  .studio-wizard.is-recording-stage .wave-compare-head { padding: 4px 0; font-size: .48rem; }
+  .studio-wizard.is-recording-stage .live-wave-shell { height: clamp(58px, 10svh, 82px); }
+  .studio-wizard.is-recording-stage .record-limit { margin-top: 5px; padding: 5px 7px; }
+  .studio-wizard.is-recording-stage .record-limit > div:first-child { font-size: .48rem; }
+  .studio-wizard.is-recording-stage .record-controls { margin-top: 5px; gap: 5px; }
+  .studio-wizard.is-recording-stage .record-controls > button { min-height: 52px; grid-template-columns: 24px 1fr; padding: 5px; }
+  .studio-wizard.is-recording-stage .record-controls > button > span { width: 24px; height: 24px; }
+  .studio-wizard.is-recording-stage .record-controls strong { font-size: .53rem; }
+  .studio-wizard.is-recording-stage .record-controls small { font-size: .41rem; }
+}

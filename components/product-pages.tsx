@@ -109,6 +109,15 @@ function Logo({ compact = false }: { compact?: boolean }) {
   );
 }
 
+function useProfileName() {
+  const [profileName, setProfileName] = useState('Профиль');
+  useEffect(() => {
+    const email = String(window.localStorage.getItem('dublika-user') || '').trim();
+    setProfileName(email ? email.split('@')[0] : 'Профиль');
+  }, []);
+  return profileName;
+}
+
 function ThemeButton({ darkMode, toggleTheme }: Pick<PageProps, 'darkMode' | 'toggleTheme'>) {
   return (
     <button className="theme-toggle" type="button" onClick={toggleTheme} aria-label={darkMode ? 'Включить светлую тему' : 'Включить тёмную тему'}>
@@ -337,6 +346,7 @@ function AuthPage(props: PageProps) {
 }
 
 export function AppSidebar({ route, navigate }: { route: string; navigate: Navigate }) {
+  const profileName = useProfileName();
   return (
     <Sidebar collapsible="icon" className="app-sidebar">
       <SidebarHeader><button className="sidebar-logo" type="button" onClick={() => navigate('/')}><Logo /></button></SidebarHeader>
@@ -352,20 +362,21 @@ export function AppSidebar({ route, navigate }: { route: string; navigate: Navig
       </SidebarContent>
       <SidebarFooter>
         <SidebarMenu><SidebarMenuItem><SidebarMenuButton tooltip="Настройки" isActive={route === '/settings'} onClick={() => navigate('/settings')}><Settings /><span>Настройки</span></SidebarMenuButton></SidebarMenuItem></SidebarMenu>
-        <button className="sidebar-user" type="button"><span>А</span><div><strong>Алексей</strong><small>Бесплатный</small></div><ChevronRight /></button>
+        <button className="sidebar-user" type="button" onClick={() => navigate('/settings')}><span>{profileName.slice(0, 1).toUpperCase()}</span><div><strong>{profileName}</strong><small>Бесплатный</small></div><ChevronRight /></button>
       </SidebarFooter>
     </Sidebar>
   );
 }
 
 function DashboardHeader(props: PageProps) {
-  return <header className="dashboard-topbar"><SidebarTrigger><Menu /></SidebarTrigger><div className="dashboard-crumb"><span>Дублика</span><ChevronRight /><strong>{menuItems.find((item) => item.path === props.route)?.label || 'Кабинет'}</strong></div><div><ThemeButton darkMode={props.darkMode} toggleTheme={props.toggleTheme} /><button className="dashboard-trial" type="button"><Sparkles /> 3 видео</button><button className="dashboard-avatar" type="button">А</button></div></header>;
+  const profileName = useProfileName();
+  return <header className="dashboard-topbar"><SidebarTrigger><Menu /></SidebarTrigger><div className="dashboard-crumb"><span>Дублика</span><ChevronRight /><strong>{menuItems.find((item) => item.path === props.route)?.label || 'Кабинет'}</strong></div><div><ThemeButton darkMode={props.darkMode} toggleTheme={props.toggleTheme} /><button className="dashboard-trial" type="button"><Sparkles /> 3 видео</button><button className="dashboard-avatar" type="button" aria-label="Открыть настройки">{profileName.slice(0, 1).toUpperCase()}</button></div></header>;
 }
 
 function DashboardHome({ navigate }: Pick<PageProps, 'navigate'>) {
   return (
     <div className="dashboard-content">
-      <section className="dash-welcome"><div><span>добрый день, алексей</span><h1>Что озвучим сегодня?</h1><p>У вас три бесплатные обработки — карты и подписка не нужны.</p></div><button type="button" onClick={() => navigate('/catalog')}><Plus /> Сделать видео</button></section>
+      <section className="dash-welcome"><div><span>ваша студия</span><h1>Что озвучим сегодня?</h1><p>У вас три бесплатные обработки — карты и подписка не нужны.</p></div><button type="button" onClick={() => navigate('/catalog')}><Plus /> Сделать видео</button></section>
       <div className="stats-grid">
         <article><span className="stat-icon lime"><Clapperboard /></span><div><small>Бесплатные обработки</small><strong>3 <em>из 3</em></strong></div><Progress value={100} /></article>
         <article><span className="stat-icon aqua"><Clock3 /></span><div><small>Минут озвучено</small><strong>0:00</strong></div><span className="stat-note">Начните первый проект</span></article>
@@ -425,7 +436,9 @@ function CommunityPage({ navigate }: Pick<PageProps, 'navigate'>) {
 }
 
 function SettingsPage(props: PageProps) {
-  return <div className="dashboard-content"><section className="inner-heading"><div><span>аккаунт</span><h1>Настройки</h1><p>Профиль, уведомления и приватность проектов.</p></div></section><div className="settings-grid"><section><h2>Профиль</h2><div className="settings-profile"><span>А</span><div><strong>Алексей</strong><small>Демо-аккаунт</small></div><button>Изменить фото</button></div><label>Имя<input defaultValue="Алексей" /></label><label>Электронная почта<input defaultValue="demo@dublika.ru" /></label><button className="settings-save" onClick={() => props.notify('Настройки сохранены')}>Сохранить изменения</button></section><section><h2>Приватность</h2><div className="security-row"><ShieldCheck /><div><strong>Приватные проекты по умолчанию</strong><small>Только вы видите исходники и готовые видео.</small></div><span className="fake-switch is-on"><i /></span></div><div className="security-row"><Mail /><div><strong>Письма о готовности</strong><small>Сообщим, когда обработка закончится.</small></div><span className="fake-switch is-on"><i /></span></div><div className="security-row"><Crown /><div><strong>Автоудаление исходников</strong><small>Через 24 часа после готовности видео.</small></div><span className="fake-switch is-on"><i /></span></div></section></div></div>;
+  const profileName = useProfileName();
+  const email = typeof window === 'undefined' ? '' : String(window.localStorage.getItem('dublika-user') || '');
+  return <div className="dashboard-content"><section className="inner-heading"><div><span>аккаунт</span><h1>Настройки</h1><p>Профиль, уведомления и приватность проектов.</p></div></section><div className="settings-grid"><section><h2>Профиль</h2><div className="settings-profile"><span>{profileName.slice(0, 1).toUpperCase()}</span><div><strong>{profileName}</strong><small>{email || 'Войдите по почте'}</small></div><button>Изменить фото</button></div><label>Имя<input defaultValue={profileName === 'Профиль' ? '' : profileName} placeholder="Как вас называть" /></label><label>Электронная почта<input defaultValue={email} placeholder="you@example.com" /></label><button className="settings-save" onClick={() => props.notify('Настройки сохранены')}>Сохранить изменения</button></section><section><h2>Приватность</h2><div className="security-row"><ShieldCheck /><div><strong>Приватные проекты по умолчанию</strong><small>Только вы видите исходники и готовые видео.</small></div><span className="fake-switch is-on"><i /></span></div><div className="security-row"><Mail /><div><strong>Письма о готовности</strong><small>Сообщим, когда обработка закончится.</small></div><span className="fake-switch is-on"><i /></span></div><div className="security-row"><Crown /><div><strong>Автоудаление исходников</strong><small>Через 24 часа после готовности видео.</small></div><span className="fake-switch is-on"><i /></span></div></section></div></div>;
 }
 
 function DashboardPage(props: PageProps) {

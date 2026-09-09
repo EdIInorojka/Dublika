@@ -6,6 +6,7 @@ import { extname, join, normalize, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { spawn } from 'node:child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import ffmpegPath from 'ffmpeg-static';
 
 const root = resolve(import.meta.dirname, '..');
@@ -16,7 +17,8 @@ const recordingDir = join(dataDir, 'recordings');
 const outputDir = join(dataDir, 'outputs');
 const ytDlpPath = join(root, '.local-bin', 'yt-dlp.exe');
 const deepgramKeyPath = join(root, 'ключ.txt');
-const statePath = join(dataDir, 'state.json');
+const productionStatePath = join(dataDir, 'state.json');
+const sandboxStatePath = join(dataDir, 'test-state.json');
 const port = Number(process.env.LOCAL_APP_PORT || 8788);
 const maxVideoBytes = 1024 * 1024 * 1024;
 const maxAudioBytes = 40 * 1024 * 1024;
@@ -47,17 +49,41 @@ function initialState() {
   return { secret: randomBytes(32).toString('hex'), users: {}, devices: {}, projects: {} };
 }
 
-function loadState() {
-  try { return JSON.parse(readFileSync(statePath, 'utf8')); } catch { const state = initialState(); saveState(state); return state; }
+function writeState(path, next) {
+  mkdirSync(dataDir, { recursive: true });
+  const temporary = `${path}.tmp`;
+  writeFileSync(temporary, JSON.stringify(next, null, 2));
+  renameSync(temporary, path);
 }
 
-const state = loadState();
+function loadState(path) {
+  try { return JSON.parse(readFileSync(path, 'utf8')); } catch { const next = initialState(); writeState(path, next); return next; }
+}
 
-function saveState(next = state) {
-  mkdirSync(dataDir, { recursive: true });
-  const temporary = `${statePath}.tmp`;
-  writeFileSync(temporary, JSON.stringify(next, null, 2));
-  renameSync(temporary, statePath);
+const productionStore = { realm: 'production', path: productionStatePath, data: loadState(productionStatePath) };
+const sandboxStore = { realm: 'test', path: sandboxStatePath, data: loadState(sandboxStatePath) };
+const stateContext = new AsyncLocalStorage();
+
+function activeStore() {
+  return stateContext.getStore() || productionStore;
+}
+
+// Existing route code can keep using `state`, while each request is isolated
+// through AsyncLocalStorage. QA traffic never shares users, credits, projects
+// or signing secrets with the production profile database.
+const state = new Proxy({}, {
+  get(_target, key) { return activeStore().data[key]; },
+  set(_target, key, value) { activeStore().data[key] = value; return true; },
+});
+
+function saveState(next = activeStore().data) {
+  writeState(activeStore().path, next);
+}
+
+function requestStore(request) {
+  const environment = String(request.headers['x-dublika-environment'] || '').toLowerCase();
+  const isSandboxMedia = String(request.url || '').includes('realm=test');
+  return environment === 'test' || isSandboxMedia ? sandboxStore : productionStore;
 }
 
 function sendJson(response, status, payload) {
@@ -75,7 +101,7 @@ function setSecurityHeaders(request, response) {
   if (allowedOrigins.has(origin)) {
     response.setHeader('Access-Control-Allow-Origin', origin);
     response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Device-Id, X-File-Name, X-Recording-Lead-In, X-Recording-Tail-Out');
+    response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Device-Id, X-Dublika-Environment, X-File-Name, X-Recording-Lead-In, X-Recording-Tail-Out');
     response.setHeader('Access-Control-Allow-Private-Network', 'true');
     response.setHeader('Vary', 'Origin');
   }
@@ -147,15 +173,15 @@ function hasMediaToken(url, projectId, resource) {
 }
 
 function sourceMediaUrl(project) {
-  return `/media/projects/${project.id}/source?access=${encodeURIComponent(signMediaToken(project.id, 'source'))}`;
+  return `/media/projects/${project.id}/source?access=${encodeURIComponent(signMediaToken(project.id, 'source'))}&realm=${activeStore().realm}`;
 }
 
 function takeMediaUrl(project, segmentId) {
-  return `/media/projects/${project.id}/takes/${segmentId}?access=${encodeURIComponent(signMediaToken(project.id, `take:${segmentId}`))}`;
+  return `/media/projects/${project.id}/takes/${segmentId}?access=${encodeURIComponent(signMediaToken(project.id, `take:${segmentId}`))}&realm=${activeStore().realm}`;
 }
 
 function outputMediaUrl(project) {
-  return `/media/outputs/${project.id}.mp4?access=${encodeURIComponent(signMediaToken(project.id, 'output'))}`;
+  return `/media/outputs/${project.id}.mp4?access=${encodeURIComponent(signMediaToken(project.id, 'output'))}&realm=${activeStore().realm}`;
 }
 
 function tokenUser(request) {
@@ -301,7 +327,7 @@ async function waveformForRange(project, start, end) {
   } catch {
     return Array.from({ length: 96 }, () => 0);
   }
-  const levels = [];
+  const rawLevels = [];
   const sampleCount = Math.floor(samples.length / 2);
   for (let bucket = 0; bucket < 96; bucket += 1) {
     const from = Math.floor(bucket * sampleCount / 96);
@@ -311,9 +337,13 @@ async function waveformForRange(project, start, end) {
       const value = samples.readInt16LE(index * 2) / 32768;
       sum += value * value;
     }
-    levels.push(rounded(Math.min(1, Math.sqrt(sum / Math.max(1, to - from)) * 2.4)));
+    rawLevels.push(Math.sqrt(sum / Math.max(1, to - from)));
   }
-  return levels;
+  // These levels drive a visual editor, not a loudness meter. Normalising the
+  // real samples per source keeps a quiet original track and a phone mic on
+  // the same readable scale while preserving every peak and pause.
+  const reference = Math.max(0.018, ...rawLevels);
+  return rawLevels.map((level) => rounded(Math.min(.92, Math.pow(level / reference, .72) * .9)));
 }
 
 async function waveformForSegment(project, segment) {
@@ -672,22 +702,28 @@ async function renderProject(user, project) {
     // Recordings made before this feature have no padding metadata and remain
     // sample-aligned. New takes include their one-second lead-in and tail-out.
     const leadIn = Math.min(recordingLeadSeconds, Math.max(0, Number(take.leadIn) || 0));
-    const tailOut = Math.min(recordingTailSeconds, Math.max(0, Number(take.tailOut) || 0));
     const delay = Math.max(0, Math.round((Number.isFinite(segment.outputStart) ? segment.outputStart : segment.start - project.trim.start) * 1000));
-    const mixedDuration = Math.max(.25, segment.end - segment.start + tailOut);
-    const takeEnd = leadIn + mixedDuration;
-    filters.push(`[${1 + index}:a]highpass=f=80,lowpass=f=12000,afftdn=nf=-24,dynaudnorm=f=150:g=13,loudnorm=I=-16:TP=-1.5:LRA=9,atrim=${leadIn.toFixed(3)}:${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,adelay=${delay}:all=1[t${index}]`);
+    const spokenDuration = Math.max(.25, segment.end - segment.start);
+    const takeEnd = leadIn + spokenDuration;
+    // The extra second captured before and after a cue is only a recording
+    // safety margin. It must never bleed into the next cue in the export.
+    // A short fade removes the click that arose when WebM takes met exactly
+    // at a segment boundary.
+    const edgeFade = Math.min(.045, spokenDuration / 4);
+    const fadeOutAt = Math.max(0, spokenDuration - edgeFade);
+    filters.push(`[${1 + index}:a]highpass=f=80,lowpass=f=12000,afftdn=nf=-25,acompressor=threshold=-20dB:ratio=3:attack=12:release=150:makeup=2,atrim=start=${leadIn.toFixed(3)}:end=${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${edgeFade.toFixed(3)},afade=t=out:st=${fadeOutAt.toFixed(3)}:d=${edgeFade.toFixed(3)},volume=.9,adelay=${delay}:all=1[t${index}]`);
   });
   const takeLabels = recorded.map((_, index) => `[t${index}]`).join('');
-  filters.push(`${takeLabels}amix=inputs=${recorded.length}:normalize=0,alimiter=limit=.9[voice]`);
+  filters.push(`${takeLabels}amix=inputs=${recorded.length}:normalize=0:dropout_transition=0,alimiter=limit=.88[voice]`);
   if (sourceHasSound) {
-    // Spoken dialogue is usually centred. Mid/side cancellation removes it
-    // much more decisively than simply turning down the mid channel, while
-    // preserving side-panned music and effects in typical stereo footage.
-    filters.push('[original]aformat=channel_layouts=stereo,pan=stereo|c0=0.5*c0-0.5*c1|c1=0.5*c1-0.5*c0,volume=1.25[effects]');
+    // Speech is typically centred, but fully subtracting the mid channel also
+    // erased centre-panned ambience and effects. This gentler matrix keeps
+    // those layers while substantially reducing the original dialogue before
+    // the new take ducks the remaining speech.
+    filters.push('[original]aformat=channel_layouts=stereo,pan=stereo|c0=.78*c0-.46*c1|c1=.78*c1-.46*c0,volume=.92[effects]');
     filters.push('[voice]asplit=2[voice_sc][voice_mix]');
-    filters.push('[effects][voice_sc]sidechaincompress=threshold=.018:ratio=14:attack=7:release=260[ducked]');
-    filters.push("[ducked][voice_mix]amix=inputs=2:normalize=0:weights='0.9 1.15',alimiter=limit=.95[aout]");
+    filters.push('[effects][voice_sc]sidechaincompress=threshold=.022:ratio=8:attack=12:release=220[ducked]');
+    filters.push("[ducked][voice_mix]amix=inputs=2:normalize=0:dropout_transition=0:weights='0.82 1.08',alimiter=limit=.92[aout]");
   } else {
     filters.push('[voice]anull[aout]');
   }
@@ -922,7 +958,7 @@ function sendFile(request, response, path) {
   createReadStream(path).pipe(response);
 }
 
-const server = createServer(async (request, response) => {
+const server = createServer((request, response) => stateContext.run(requestStore(request), async () => {
   setSecurityHeaders(request, response);
   try {
     const origin = String(request.headers.origin || '');
@@ -963,7 +999,7 @@ const server = createServer(async (request, response) => {
     const status = error.message === 'payload_too_large' ? 413 : Number(error.statusCode) || 500;
     return sendJson(response, status, { error: String(error.message || 'Ошибка сервера') });
   }
-});
+}));
 
 server.listen(port, '127.0.0.1', () => {
   console.log(`\nДублика запущена: http://localhost:${port}`);

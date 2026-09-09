@@ -5,7 +5,6 @@ import {
   ArrowLeft,
   ArrowRight,
   BadgeCheck,
-  Captions,
   Check,
   ChevronDown,
   CircleHelp,
@@ -29,7 +28,6 @@ import {
   SkipForward,
   Sun,
   Moon,
-  TimerReset,
   UploadCloud,
   UserRound,
   Volume2,
@@ -48,7 +46,6 @@ import {
 import { Progress } from '@/components/ui/progress';
 import { Slider } from '@/components/ui/slider';
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar';
-import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { apiFetch, mediaUrl } from '@/lib/local-api';
 
@@ -186,6 +183,7 @@ export default function Home() {
   const [editorLevels, setEditorLevels] = useState<number[]>([]);
   const [editorPlayhead, setEditorPlayhead] = useState(0);
   const [timelineDragging, setTimelineDragging] = useState(false);
+  const [wizardStep, setWizardStep] = useState<1 | 2 | 3 | 4>(1);
 
   useEffect(() => {
     const handlePopState = () => setRoute(`${window.location.pathname}${window.location.search}${window.location.hash}`);
@@ -197,12 +195,17 @@ export default function Home() {
   const finishedSegments = segments.filter((item) => item.state !== 'pending').length;
   const pendingSegments = segments.filter((item) => item.state === 'pending').length;
   const allSegmentsFinished = analyzed && segments.length > 0 && pendingSegments === 0 && takeUploads === 0;
-  const currentStep = assembly === 'done' ? 5 : analyzed ? 3 : sourceReady ? 2 : 1;
+  const currentStep = wizardStep;
   const activeQueuePosition = Math.max(1, segments.findIndex((item) => item.id === activeSegment) + 1);
   const firstPendingId = segments.find((item) => item.state === 'pending')?.id ?? null;
   const studioView = new URLSearchParams(route.split('?')[1] || '').get('view');
   const showResultView = studioView === 'result' && assembly === 'done' && Boolean(resultUrl);
-  const showRecordingView = analyzed && studioView !== 'edit' && !showResultView;
+  const showRecordingView = analyzed && wizardStep === 4 && !showResultView;
+  const profileLabel = (() => {
+    if (typeof window === 'undefined') return 'Профиль';
+    const email = String(window.localStorage.getItem('dublika-user') || '').trim();
+    return email ? email.split('@')[0] : 'Профиль';
+  })();
 
   const timelineBlocks = useMemo(
     () => Array.from({ length: 12 }, (_, index) => ({ id: index, hue: 194 + (index % 4) * 8, lightness: 21 + (index % 3) * 5 })),
@@ -335,6 +338,7 @@ export default function Home() {
         setActiveSegment(project.segments[0]?.id || 1);
         setTranscriptionMode(project.transcriptionMode || (project.segments.some((segment) => segment.text) ? 'transcribed' : null));
         setAnalyzed(project.segments.length > 0);
+        setWizardStep(project.segments.length > 0 ? 4 : 2);
         setAssembly(project.status === 'done' && project.outputUrl ? 'done' : 'idle');
         setResultUrl(project.outputUrl ? mediaUrl(project.outputUrl) : '');
         setCredits(nextCredits);
@@ -379,10 +383,19 @@ export default function Home() {
   }, [projectId, sourceReady, timelineDragging, trim[0], trim[1]]);
 
   const navigate: Navigate = (path) => {
-    window.history.pushState({}, '', path);
-    setRoute(path);
+    // QA is deliberately kept in a separate backend realm. Preserve the flag
+    // through the wizard so a test project can never hop into customer data
+    // half-way through upload, transcription, or render.
+    const currentParams = new URLSearchParams(route.split('?')[1]?.split('#')[0] || '');
+    const nextParams = new URLSearchParams(path.split('?')[1]?.split('#')[0] || '');
+    const [pathWithoutHash, hashFragment = ''] = path.split('#');
+    const nextPath = currentParams.get('dublika-qa') === '1' && nextParams.get('dublika-qa') !== '1'
+      ? `${pathWithoutHash}${pathWithoutHash.includes('?') ? '&' : '?'}dublika-qa=1${hashFragment ? `#${hashFragment}` : ''}`
+      : path;
+    window.history.pushState({}, '', nextPath);
+    setRoute(nextPath);
     window.scrollTo({ top: 0, behavior: 'smooth' });
-    const hash = path.split('#')[1];
+    const hash = nextPath.split('#')[1];
     if (hash) window.setTimeout(() => document.getElementById(hash)?.scrollIntoView({ behavior: 'smooth' }), 60);
   };
 
@@ -414,6 +427,7 @@ export default function Home() {
   async function loadDemo() {
     setSourceTab('demo');
     setSourceReady(true);
+    setWizardStep(2);
     setSourceName('Цветы крупным планом.mp4');
     setVideoUrl(demoVideo);
     setDuration(5.05);
@@ -489,6 +503,7 @@ export default function Home() {
     setVideoUrl(url);
     setSourceName(file.name);
     setSourceReady(true);
+    setWizardStep(2);
     setAnalyzed(false);
     setSegments([]);
     setTranscriptionMode(null);
@@ -508,6 +523,7 @@ export default function Home() {
     setVideoUrl(isDirect ? value : '');
     setSourceName(value.includes('youtu') ? 'Видео с YouTube' : value.includes('vk') ? 'Видео из VK' : 'Видео по ссылке');
     setSourceReady(true);
+    setWizardStep(2);
     setAnalyzed(false);
     setSegments([]);
     setTranscriptionMode(null);
@@ -685,8 +701,8 @@ export default function Home() {
         setTranscriptionMode(result.transcriptionMode);
         setAnalyzing(false);
         setAnalyzed(true);
-        window.history.replaceState({}, '', `/studio?project=${projectId}&view=edit`);
-        navigate(`/studio?project=${projectId}&view=record`);
+        setWizardStep(3);
+        navigate(`/studio?project=${projectId}&view=text`);
         setMessage(result.transcriptionMode === 'transcribed'
           ? `Выбранные части уже собраны в одну очередь дубляжа. Deepgram распознал ${result.segments.length} смысловых фраз — проверьте текст перед записью.`
           : result.transcriptionReason === 'no_speech'
@@ -723,11 +739,16 @@ export default function Home() {
     context.clearRect(0, 0, width, height);
 
     const barCount = 96;
+    const visualEnvelope = (values: number[]) => {
+      const peak = Math.max(.02, ...values);
+      return values.map((value) => Math.min(.92, Math.pow(Math.max(0, value) / peak, .74) * .9));
+    };
     const gap = width / barCount;
     context.strokeStyle = 'rgba(239, 86, 86, .36)';
     context.lineWidth = 2;
+    const originalEnvelope = visualEnvelope(originalLevels);
     for (let index = 0; index < barCount; index += 1) {
-      const originalHeight = Math.max(1, (originalLevels[index] || 0) * height * 0.78);
+      const originalHeight = Math.max(1, (originalEnvelope[index] || 0) * height * 0.78);
       context.beginPath();
       context.moveTo(index * gap + gap / 2, height / 2 - originalHeight / 2);
       context.lineTo(index * gap + gap / 2, height / 2 + originalHeight / 2);
@@ -753,9 +774,10 @@ export default function Home() {
 
     const current = segments.find((item) => item.id === activeSegment);
     const levels = analyser ? latestLevelsRef.current : current?.waveform || latestLevelsRef.current;
+    const voiceEnvelope = visualEnvelope(levels);
     context.strokeStyle = current?.audioUrl || analyser ? '#75e66d' : 'rgba(117, 230, 109, .22)';
     context.lineWidth = 3;
-    levels.forEach((level, index) => {
+    voiceEnvelope.forEach((level, index) => {
       if (level <= 0.003) return;
       const voiceHeight = Math.max(2, level * height * 0.9);
       context.beginPath();
@@ -1223,11 +1245,11 @@ export default function Home() {
 
   return (
     <SidebarProvider defaultOpen>
-      <AppSidebar route="/studio" navigate={navigate} />
+      {!showRecordingView && <AppSidebar route="/studio" navigate={navigate} />}
       <SidebarInset className="studio-inset">
-    <div className={`app-shell studio-app-shell ${showRecordingView ? 'is-recording-stage' : ''} ${showResultView ? 'is-result-stage' : ''}`}>
+    <div className={`app-shell studio-app-shell studio-wizard ${showRecordingView ? 'is-recording-stage' : ''} ${showResultView ? 'is-result-stage' : ''}`}>
       <header className="topbar">
-        <div className="studio-brand-group"><SidebarTrigger /><button className="brand" type="button" onClick={() => navigate('/')} aria-label="Дублика — на главную">
+        <div className="studio-brand-group">{!showRecordingView && <SidebarTrigger />}<button className="brand" type="button" onClick={() => navigate('/')} aria-label="Дублика — на главную">
           <span className="brand-mark"><span>Д</span></span><span className="brand-word">дублика</span><span className="beta">beta</span>
         </button></div>
         <nav className="main-nav" aria-label="Основная навигация">
@@ -1237,7 +1259,7 @@ export default function Home() {
           <button className="icon-button" type="button" onClick={() => setDarkMode((value) => !value)} aria-label={darkMode ? 'Светлая тема' : 'Тёмная тема'}>{darkMode ? <Sun size={18} /> : <Moon size={18} />}</button>
           <button className="credit-pill" type="button" onClick={() => setPricingOpen(true)}><Sparkles size={15} />{plan === 'Пробный' ? `${credits} видео` : plan}</button>
           <button className="icon-button help-button" type="button" aria-label="Помощь"><CircleHelp size={19} /></button>
-          <button className="account-button" type="button" onClick={() => navigate('/dashboard')}><UserRound size={17} /><span>Алексей</span></button>
+          <button className="account-button" type="button" onClick={() => navigate('/dashboard')}><UserRound size={17} /><span>{profileLabel}</span></button>
         </div>
       </header>
 
@@ -1256,7 +1278,7 @@ export default function Home() {
               <p>Ваш голос выровнен, исходная речь приглушена. Субтитры в файл не добавлялись.</p>
             </div>
             <div className="studio-result-player">
-              <video src={resultUrl} controls playsInline><track kind="captions" label="Русские субтитры" srcLang="ru" /></video>
+              <video src={resultUrl} controls playsInline />
             </div>
             <div className="studio-result-actions">
               <button className="download-button" type="button" onClick={downloadResult}><Download size={19} /> Скачать MP4</button>
@@ -1264,22 +1286,23 @@ export default function Home() {
             </div>
           </section>
         ) : <>
-        <section className="page-heading">
+        {!showRecordingView && <section className="page-heading">
           <div><p className="eyebrow"><span /> новый проект</p><h1>Озвучьте видео<br /><em>своим голосом</em></h1></div>
           <div className={`privacy-note local-server-note ${backendOnline ? 'is-online' : ''}`}><ShieldCheck size={22} /><p><strong>{backendOnline ? 'Локальный сервер работает' : 'Режим просмотра'}</strong><span>{backendOnline ? 'Файлы остаются на этом компьютере' : 'Запустите npm run local для обработки'}</span></p></div>
-        </section>
+        </section>}
 
-        <section className="stepper" aria-label="Прогресс проекта">
-          {[['01', 'Видео'], ['02', 'Отрывок'], ['03', 'Реплики'], ['04', 'Запись'], ['05', 'Готово']].map(([number, label], index) => (
-            <div className={`step ${index + 1 <= currentStep ? 'is-active' : ''}`} key={number}>
-              <span className="step-dot">{index + 1 < currentStep ? <Check size={14} /> : number}</span><span>{label}</span>{index < 4 && <i />}
+        <section className="stepper wizard-stepper" aria-label="Прогресс проекта">
+          {wizardStep > 1 && <button className="wizard-back" type="button" onClick={() => { stopPlayback(); setWizardStep((step) => Math.max(1, step - 1) as 1 | 2 | 3 | 4); }}>Назад</button>}
+          {[['01', 'Видео'], ['02', 'Фрагменты'], ['03', 'Текст'], ['04', 'Озвучка']].map(([number, label], index) => (
+            <div className={`step ${index + 1 === currentStep ? 'is-current' : index + 1 < currentStep ? 'is-complete' : ''}`} key={number}>
+              <span className="step-dot">{index + 1 < currentStep ? <Check size={14} /> : number}</span><span>{label}</span>{index < 3 && <i />}
             </div>
           ))}
         </section>
 
         <div id="studio" className="workspace-grid">
           <div className="workspace-main">
-            <section className="surface source-card">
+            {wizardStep === 1 && <section className="surface source-card wizard-panel">
               <div className="section-header">
                 <div><span className="section-index">01</span><div><h2>Добавьте видео</h2><p>Файл, ссылка или тестовый клип</p></div></div>
                 {sourceReady && <span className="success-chip">{uploading ? <span className="loader" /> : <Check size={14} />} {uploading ? 'Сохраняем…' : 'Загружено'}</span>}
@@ -1302,15 +1325,15 @@ export default function Home() {
                   <div className="demo-panel"><div className="demo-cover"><Play size={24} fill="currentColor" /></div><div><strong>Тестовый видеоклип</strong><span>00:05 · проверка загрузки и записи</span></div><button className="secondary-button" type="button" onClick={loadDemo}>Открыть клип</button></div>
                 </TabsContent>
               </Tabs>
-            </section>
+            </section>}
 
-            <section className={`surface editor-card ${!sourceReady ? 'is-muted' : ''}`}>
+            {wizardStep === 2 && <section className={`surface editor-card wizard-panel ${!sourceReady ? 'is-muted' : ''}`}>
               <div className="section-header">
                 <div><span className="section-index">02</span><div><h2>Выберите фрагменты</h2><p>До 4 минут суммарно — можно собрать сцену из нескольких моментов</p></div></div>
                 <span className="duration-chip"><Clock3 size={14} /> {formatTime(clipLength)}</span>
               </div>
               <div className="video-stage">
-                {videoUrl ? <video ref={videoRef} src={videoUrl} controls onLoadedMetadata={handleMetadata} onTimeUpdate={() => syncEditorPlayhead(videoRef.current?.currentTime || 0)} onSeeking={() => syncEditorPlayhead(videoRef.current?.currentTime || 0, true)} onPlay={() => { setIsPlaying(true); startEditorPlayheadAnimation(); }} onPause={() => { stopEditorPlayheadAnimation(); syncEditorPlayhead(videoRef.current?.currentTime || 0, true); setIsPlaying(false); }}><track kind="captions" label="Русские субтитры" srcLang="ru" /></video> : (
+                {videoUrl ? <video ref={videoRef} src={videoUrl} controls onLoadedMetadata={handleMetadata} onTimeUpdate={() => syncEditorPlayhead(videoRef.current?.currentTime || 0)} onSeeking={() => syncEditorPlayhead(videoRef.current?.currentTime || 0, true)} onPlay={() => { setIsPlaying(true); startEditorPlayheadAnimation(); }} onPause={() => { stopEditorPlayheadAnimation(); syncEditorPlayhead(videoRef.current?.currentTime || 0, true); setIsPlaying(false); }} /> : (
                   <button type="button" className="stage-placeholder" onClick={() => setIsPlaying(!isPlaying)}>
                     <span className="scene-light one" /><span className="scene-light two" /><span className="city-line" />
                     <span className="stage-play">{isPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}</span><span className="stage-caption">{sourceReady ? 'Демо-превью' : 'Загрузите видео, чтобы открыть превью'}</span>
@@ -1354,7 +1377,18 @@ export default function Home() {
                 <div className="quality-note"><WandSparkles size={18} /><p><strong>Умная обработка</strong><span>Приглушим оригинал под дублем и сохраним фон</span></p></div>
                 <button className="primary-button" type="button" onClick={() => void analyzeClip()} disabled={!sourceReady || analyzing || uploading}>{analyzing ? <><span className="loader" /> Анализируем…</> : uploading ? 'Сохраняем видео…' : <>Подготовить реплики <ArrowRight size={18} /></>}</button>
               </div>
-            </section>
+            </section>}
+
+            {wizardStep === 3 && analyzed && <section className="surface cue-review-card wizard-panel">
+              <div className="section-header">
+                <div><span className="section-index">03</span><div><h2>Проверьте текст</h2><p>Это сценарий для записи. Он не будет показан или вшит в готовое видео.</p></div></div>
+                <span className="duration-chip">{segments.length} реплик</span>
+              </div>
+              <div className="cue-review-list" aria-label="Текст реплик">
+                {segments.map((item) => <label className="cue-review-row" key={item.id}><span><b>{item.id}</b><small>{formatTime(item.start)} — {formatTime(item.end)}</small></span><textarea rows={2} value={item.text} onChange={(event) => updateText(item.id, event.target.value)} placeholder="Введите текст реплики" aria-label={`Текст реплики ${item.id}`} /></label>)}
+              </div>
+              <footer className="cue-review-footer"><span><Check size={16} /> Текст сохранится вместе с проектом</span><button className="primary-button" type="button" onClick={() => { setWizardStep(4); navigate(`/studio?project=${projectId}&view=record`); }}>К записи <ArrowRight size={18} /></button></footer>
+            </section>}
 
             {showRecordingView && (
               <section className="surface dub-console-card">
@@ -1362,13 +1396,12 @@ export default function Home() {
                 <div className="dub-console">
                   <div className="dub-workbench">
                     <div className="segment-video-wrap">
-                      <video ref={segmentVideoRef} src={videoUrl} playsInline preload="auto" onPlay={handleSegmentVideoPlay} onPause={handleSegmentVideoPause} onSeeking={handleSegmentVideoSeeking} onTimeUpdate={handleSegmentVideoTimeUpdate}><track kind="captions" label="Русские субтитры" srcLang="ru" /></video>
+                      <video ref={segmentVideoRef} src={videoUrl} playsInline preload="auto" onPlay={handleSegmentVideoPlay} onPause={handleSegmentVideoPause} onSeeking={handleSegmentVideoSeeking} onTimeUpdate={handleSegmentVideoTimeUpdate} />
                       <div className="segment-video-badge"><ListVideo /> {formatTime(activeLine.start)} — {formatTime(activeLine.end)} <i>+{formatTime(activeRecordingWindow.leadIn)} / +{formatTime(activeRecordingWindow.tailOut)}</i></div>
                       <button className="segment-preview-toggle" type="button" onClick={replayOriginal} disabled={recording !== null || countdown !== null}>{originalIsPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}<span>{originalIsPlaying ? 'Остановить' : 'Посмотреть фрагмент'}</span></button>
                       {countdown !== null && <div className="record-countdown"><span>{countdown}</span><small>приготовьтесь</small></div>}
-                      {recording === activeSegment && <div className={`live-transcript-overlay ${transcriptionState !== 'listening' ? 'is-muted' : ''}`}><Captions /><span>{liveTranscript || (transcriptionState === 'unsupported' ? 'Живая транскрипция недоступна в этом браузере' : transcriptionState === 'error' ? 'Не удалось распознать речь — текст можно ввести ниже' : 'Говорите — субтитры появятся здесь…')}</span></div>}
                     </div>
-                    <div className="active-caption"><span>{recording === activeSegment ? 'Живая транскрипция' : transcriptionMode === 'transcribed' ? `Deepgram · реплика ${activeSegment}` : `Сценарий · реплика ${activeSegment}`}</span><textarea rows={2} value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} placeholder={transcriptionMode === 'transcribed' ? 'Проверьте или вставьте полный текст реплики' : 'Введите или вставьте текст, который нужно озвучить'} aria-label="Текст активной реплики" /></div>
+                    <div className="active-caption"><span>{transcriptionMode === 'transcribed' ? `Текст реплики ${activeSegment}` : `Сценарий · реплика ${activeSegment}`}</span><textarea rows={2} value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} placeholder={transcriptionMode === 'transcribed' ? 'Проверьте или вставьте полный текст реплики' : 'Введите или вставьте текст, который нужно озвучить'} aria-label="Текст активной реплики" /></div>
                     <div className="wave-compare-head"><div><span className="legend-original"><i /> Оригинал</span><span className="legend-dub"><i /> Ваш дубль</span></div><span className={recording === activeSegment ? 'live-indicator is-live' : 'live-indicator'}><i /> {recording === activeSegment ? 'микрофон активен' : activeLine.audioUrl ? 'дубль записан' : 'готов к записи'}</span></div>
                     <div className="live-wave-shell"><canvas ref={liveWaveRef} className="live-wave-canvas" aria-label="Сравнение громкости оригинала и живого сигнала микрофона" /><div className="wave-centerline" /></div>
                     <div className={`record-limit ${recording === activeSegment ? 'is-recording' : ''}`}><div><span>{recording === activeSegment ? 'Запись завершится автоматически' : `Окно: ${formatTime(activeRecordingWindow.leadIn)} до · реплика · ${formatTime(activeRecordingWindow.tailOut)} после`}</span><strong>{formatTime(recording === activeSegment ? recordRemaining : activeRecordingWindow.duration)}</strong></div><div className="record-limit-track"><i style={{ width: `${recording === activeSegment ? recordProgress : 0}%` }} /></div></div>
@@ -1376,9 +1409,6 @@ export default function Home() {
                       <button className={recording === activeSegment ? 'main-record-control is-recording' : 'main-record-control'} type="button" onClick={() => void toggleRecord(activeSegment)} disabled={countdown !== null}><span>{recording === activeSegment ? <i /> : <Mic />}</span><strong>{recording === activeSegment ? 'Стоп' : countdown !== null ? `${countdown}…` : 'Записать'}</strong><small>{recording === activeSegment ? `осталось ${formatTime(recordRemaining)}` : `${formatTime(activeRecordingWindow.duration)} с запасом`}</small></button>
                       <button className={takeIsPlaying ? 'is-playing' : ''} type="button" onClick={() => playTake(activeLine)} disabled={!activeLine.audioUrl || recording !== null}><span>{takeIsPlaying ? <Pause /> : <Headphones />}</span><strong>{takeIsPlaying ? 'Остановить' : 'Мой дубль'}</strong><small>{takeIsPlaying ? 'идёт воспроизведение' : 'прослушать запись'}</small></button>
                       <button type="button" onClick={nextSegment} disabled={recording !== null || countdown !== null}><span><SkipForward /></span><strong>{allSegmentsFinished ? 'Собрать' : 'Дальше'}</strong><small>{allSegmentsFinished ? 'запустить рендер' : 'следующая реплика'}</small></button>
-                    </div>
-                    <div className="record-options">
-                      <div className="record-option-row"><span className="option-icon"><TimerReset /></span><span><strong>Отсчёт 3 секунды</strong><small>Даёт время приготовиться</small></span><Switch aria-label="Включить трёхсекундный отсчёт" checked={countdownEnabled} onCheckedChange={setCountdownEnabled} /></div>
                     </div>
                   </div>
                   <div className="line-list segment-queue" aria-label="Список реплик">
@@ -1405,7 +1435,7 @@ export default function Home() {
             )}
           </div>
 
-          <aside className="workspace-aside">
+          {!showRecordingView && <aside className="workspace-aside">
             <section className="summary-card">
               <div className="summary-head"><span>Ваш проект</span><button aria-label="Закрыть сводку"><X size={17} /></button></div>
               <div className="project-preview"><div className="project-thumb"><span><Play size={18} fill="currentColor" /></span></div><div><strong>{sourceReady ? sourceName.replace(/\.[^.]+$/, '') : 'Новый дубляж'}</strong><span>{formatTime(clipLength)} · {segments.length} реплики</span></div></div>
@@ -1414,13 +1444,13 @@ export default function Home() {
                 <div><span><Music2 size={17} /> Фоновая музыка</span><strong>Сохранить <Check size={14} /></strong></div>
                 <div><span><BadgeCheck size={17} /> Качество</span><strong>Full HD <ChevronDown size={14} /></strong></div>
               </div>
-              {assembly === 'processing' && <div className="render-state"><div><span>Собираем видео</span><strong>{assemblyProgress}%</strong></div><Progress value={assemblyProgress} /><small>Сводим голос, музыку и субтитры</small></div>}
+              {assembly === 'processing' && <div className="render-state"><div><span>Собираем видео</span><strong>{assemblyProgress}%</strong></div><Progress value={assemblyProgress} /><small>Сводим голос и звуковой фон</small></div>}
               {assembly === 'done' ? <button className="download-button" type="button" onClick={downloadResult}><Download size={18} /> Скачать результат</button> : <button className="assemble-button" type="button" disabled={assembly === 'processing' || !allSegmentsFinished} onClick={assembleVideo}><Sparkles size={18} /> {assembly === 'processing' ? 'Обрабатываем…' : allSegmentsFinished ? 'Собрать видео' : `Осталось реплик: ${pendingSegments}`}</button>}
               <p className="price-line"><span>{plan === 'Пробный' ? 'Три обработки бесплатно' : `Тариф «${plan}» активен`}</span><ShieldCheck size={14} /> Без водяного знака</p>
             </section>
             <section className="aside-tip"><span className="tip-icon"><LockKeyhole size={20} /></span><div><strong>Приватный проект</strong><p>Ссылку на результат увидите только вы.</p></div></section>
             <section id="projects" className="quota-card"><div><span>Осталось обработок</span><strong>{plan === 'Пробный' ? `${credits} из 3` : '5 из 5'}</strong></div><Progress value={plan === 'Пробный' ? credits / 3 * 100 : 100} /><button type="button" onClick={() => setPricingOpen(true)}>Получить ещё обработки <ArrowRight size={15} /></button></section>
-          </aside>
+          </aside>}
         </div>
         </>}
 
