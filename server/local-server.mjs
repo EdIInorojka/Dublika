@@ -23,7 +23,7 @@ const maxAudioBytes = 40 * 1024 * 1024;
 const maxSelectedSeconds = 240;
 const minSegmentSeconds = 2;
 const maxSegmentSeconds = 4;
-const maxNaturalSentenceSeconds = 8;
+const maxNaturalSentenceSeconds = 4.8;
 const recordingLeadSeconds = 1;
 const recordingTailSeconds = 1;
 const videoExtensions = new Set(['.mp4', '.mov', '.webm', '.mkv', '.m4v']);
@@ -391,9 +391,9 @@ function transcriptUnits(payload, clipStart, clipEnd) {
 }
 
 /**
- * Keep full sentences together whenever possible. Four seconds is a useful
- * performance target, not a reason to cut a thought in half: a naturally
- * spoken sentence may take up to eight seconds and gets recording padding.
+ * Keep a thought together whenever possible, while keeping recording turns
+ * comfortable on a phone. Prefer sentence and comma boundaries; if speech has
+ * no natural pause, split only between complete words at about five seconds.
  */
 function phraseSegments(units, clipStart, clipEnd) {
   const inClip = units.map((unit) => ({
@@ -421,12 +421,12 @@ function phraseSegments(units, clipStart, clipEnd) {
     const candidateDuration = unit.end - groupStart;
     const groupDuration = previousEnd - groupStart;
     const gap = unit.start - previousEnd;
-    // An unpunctuated narration must still have a comfortable ceiling. When
-    // there is punctuation, keep the whole sentence instead of cutting at 4s.
+    // An unpunctuated narration must still have a comfortable ceiling.
     if (candidateDuration > maxNaturalSentenceSeconds && groupDuration >= 1.25) commit();
     group.push(unit);
     const duration = group[group.length - 1].end - group[0].start;
-    if (hasPhraseEnd(unit.text) || (gap >= 0.48 && duration >= 1.6)) commit();
+    const hasSoftBreak = /[,;:—–-]$/.test(unit.text);
+    if (hasPhraseEnd(unit.text) || (hasSoftBreak && duration >= 2.15) || (gap >= 0.48 && duration >= 1.6)) commit();
   }
   commit();
 
@@ -448,27 +448,6 @@ function phraseSegments(units, clipStart, clipEnd) {
     end: rounded(Math.min(clipEnd, sentence[sentence.length - 1].end)),
     text: sentence.map((unit) => unit.text).join(' ').replace(/\s+([,.!?…;:])/g, '$1').trim(),
   })).filter((segment) => segment.end - segment.start >= 0.35);
-}
-
-function srtTime(value) {
-  const milliseconds = Math.max(0, Math.round(value * 1000));
-  const hours = Math.floor(milliseconds / 3_600_000);
-  const minutes = Math.floor(milliseconds % 3_600_000 / 60_000);
-  const seconds = Math.floor(milliseconds % 60_000 / 1000);
-  const remainder = milliseconds % 1000;
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')},${String(remainder).padStart(3, '0')}`;
-}
-
-function writeSubtitles(project) {
-  const subtitlePath = join(dataDir, `${project.id}.srt`);
-  const contents = project.segments.map((segment, index) => {
-    const start = Number.isFinite(segment.outputStart) ? segment.outputStart : segment.start - project.trim.start;
-    const end = Number.isFinite(segment.outputEnd) ? segment.outputEnd : segment.end - project.trim.start;
-    const text = String(segment.text || '').replace(/[\r\n]+/g, ' ').trim();
-    return `${index + 1}\n${srtTime(start)} --> ${srtTime(end)}\n${text}\n`;
-  }).join('\n');
-  writeFileSync(subtitlePath, contents, 'utf8');
-  return subtitlePath;
 }
 
 function projectClips(project) {
@@ -643,7 +622,7 @@ async function renderProject(user, project) {
   const sourceHasSound = await sourceHasAudio(project.inputPath);
   const sourceVideoLabels = clips.map((clip, index) => `[0:v]trim=start=${clip.start}:end=${clip.end},setpts=PTS-STARTPTS[v${index}]`);
   filters.push(...sourceVideoLabels);
-  let sourceVideoLabel;
+  const sourceVideoLabel = '[vsource]';
   if (sourceHasSound) {
     clips.forEach((clip, index) => {
       const clipDuration = Math.max(.04, clip.end - clip.start);
@@ -655,7 +634,6 @@ async function renderProject(user, project) {
   } else {
     filters.push(`${clips.map((_, index) => `[v${index}]`).join('')}concat=n=${clips.length}:v=1:a=0[vsource]`);
   }
-  sourceVideoLabel = '[vsource]';
   recorded.forEach((segment, index) => {
     const take = project.recordings[segment.id];
     // Recordings made before this feature have no padding metadata and remain
@@ -699,47 +677,77 @@ async function renderProject(user, project) {
   saveState();
 }
 
+function badRequest(message) {
+  const error = new Error(message);
+  error.statusCode = 400;
+  return error;
+}
+
+function isBlockedRemoteAddress(value) {
+  const address = String(value || '').toLowerCase();
+  if (!address || address === '::' || address === '::1' || address.startsWith('fe80:') || address.startsWith('fc') || address.startsWith('fd')) return true;
+  const ipv4 = address.startsWith('::ffff:') ? address.slice(7) : address;
+  return ipv4 === '0.0.0.0'
+    || ipv4.startsWith('127.')
+    || ipv4.startsWith('10.')
+    || ipv4.startsWith('192.168.')
+    || ipv4.startsWith('169.254.')
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(ipv4)
+    || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ipv4)
+    || ipv4.startsWith('198.18.')
+    || ipv4.startsWith('198.19.');
+}
+
 async function validateRemoteUrl(value) {
-  const url = new URL(value);
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Разрешены только HTTP/HTTPS ссылки');
+  let url;
+  try { url = new URL(value); } catch { throw badRequest('Введите корректную ссылку на видео'); }
+  if (!['http:', 'https:'].includes(url.protocol)) throw badRequest('Разрешены только HTTP/HTTPS ссылки');
   const result = await lookup(url.hostname, { all: true });
-  const blocked = result.some(({ address }) => address === '::1' || address.startsWith('127.') || address.startsWith('10.') || address.startsWith('192.168.') || /^172\.(1[6-9]|2\d|3[01])\./.test(address) || address.startsWith('169.254.'));
-  if (blocked) throw new Error('Локальные сетевые адреса запрещены');
+  const blocked = result.some(({ address }) => isBlockedRemoteAddress(address));
+  if (blocked) throw badRequest('Локальные сетевые адреса запрещены');
   return url;
 }
 
 async function downloadRemote(value, destination) {
-  let url = await validateRemoteUrl(value);
-  let result;
-  for (let redirects = 0; redirects <= 5; redirects += 1) {
-    result = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(120000) });
-    if (![301, 302, 303, 307, 308].includes(result.status)) break;
-    const location = result.headers.get('location');
-    if (!location) throw new Error('Ссылка перенаправляет без адреса');
-    url = await validateRemoteUrl(new URL(location, url).toString());
-  }
-  if (!result) throw new Error('Не удалось открыть ссылку');
-  if (!result.ok || !result.body) throw new Error(`Не удалось скачать видео: HTTP ${result.status}`);
-  const length = Number(result.headers.get('content-length') || 0);
-  if (length > maxVideoBytes) throw new Error('Видео больше 1 ГБ');
-  let size = 0;
-  const limiter = new TransformStream({ transform(chunk, controller) { size += chunk.byteLength; if (size > maxVideoBytes) throw new Error('Видео больше 1 ГБ'); controller.enqueue(chunk); } });
   try {
+    let url = await validateRemoteUrl(value);
+    let result;
+    for (let redirects = 0; redirects <= 5; redirects += 1) {
+      result = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(120000) });
+      if (![301, 302, 303, 307, 308].includes(result.status)) break;
+      const location = result.headers.get('location');
+      if (!location) throw new Error('Ссылка перенаправляет без адреса');
+      url = await validateRemoteUrl(new URL(location, url).toString());
+    }
+    if (!result) throw new Error('Не удалось открыть ссылку');
+    if (!result.ok || !result.body) throw new Error(`Не удалось скачать видео: HTTP ${result.status}`);
+    const length = Number(result.headers.get('content-length') || 0);
+    if (length > maxVideoBytes) throw new Error('Видео больше 1 ГБ');
+    let size = 0;
+    const limiter = new TransformStream({ transform(chunk, controller) { size += chunk.byteLength; if (size > maxVideoBytes) throw new Error('Видео больше 1 ГБ'); controller.enqueue(chunk); } });
     await pipeline(Readable.fromWeb(result.body.pipeThrough(limiter)), createWriteStream(destination, { flags: 'wx' }));
+    return size;
   } catch (error) {
     try { unlinkSync(destination); } catch { /* best-effort cleanup */ }
-    throw error;
+    // Some Windows security profiles permit the isolated downloader but block
+    // Node's network stack. Keep direct MP4 links usable in that environment
+    // by falling back to the same sandboxed yt-dlp worker used for platforms.
+    try { return await downloadWithYtDlp(value, destination, false); } catch { throw error; }
   }
-  return size;
 }
 
-async function downloadPlatformVideo(value, destination) {
+async function downloadWithYtDlp(value, destination, platform) {
   if (!existsSync(ytDlpPath)) throw new Error('Модуль импорта YouTube/VK не установлен. Выполните npm run setup:media');
   const url = await validateRemoteUrl(value);
   const ffmpegDirectory = resolve(ffmpegPath, '..');
-  await runProcess(ytDlpPath, ['--no-playlist', '--no-warnings', '--max-filesize', '1G', '--format', 'bv*[height<=1080]+ba/b[height<=1080]', '--merge-output-format', 'mp4', '--ffmpeg-location', ffmpegDirectory, '--output', destination, url.toString()]);
+  const format = platform ? 'bv*[height<=1080]+ba/b[height<=1080]' : 'best';
+  await runProcess(ytDlpPath, ['--no-playlist', '--no-warnings', '--no-part', '--max-filesize', '1G', '--format', format, '--merge-output-format', 'mp4', '--ffmpeg-location', ffmpegDirectory, '--output', destination, url.toString()]);
   if (!existsSync(destination)) throw new Error('Видео не было сохранено');
   return statSync(destination).size;
+}
+
+async function downloadPlatformVideo(value, destination) {
+  return downloadWithYtDlp(value, destination, true);
 }
 
 async function handleApi(request, response, url) {
@@ -775,7 +783,7 @@ async function handleApi(request, response, url) {
   if (pathname === '/api/projects/import' && request.method === 'POST') {
     const user = actor(request);
     const body = await readJson(request);
-    const source = new URL(String(body.url || ''));
+    const source = await validateRemoteUrl(String(body.url || ''));
     const extension = videoExtensions.has(extname(source.pathname).toLowerCase()) ? extname(source.pathname).toLowerCase() : '.mp4';
     const id = randomUUID();
     const inputPath = join(uploadDir, `${id}${extension}`);
@@ -911,7 +919,8 @@ const server = createServer(async (request, response) => {
     return sendFile(request, response, path);
   } catch (error) {
     console.error(error);
-    return sendJson(response, error.message === 'payload_too_large' ? 413 : 500, { error: String(error.message || 'Ошибка сервера') });
+    const status = error.message === 'payload_too_large' ? 413 : Number(error.statusCode) || 500;
+    return sendJson(response, status, { error: String(error.message || 'Ошибка сервера') });
   }
 });
 

@@ -582,7 +582,12 @@ h1 em { color: #397c5d; font-style: normal; }
 .segment-queue-slider { padding: 2px 0; }
 .segment-queue-scale { font-size: .55rem; }
 .segment-queue .line-item { flex: 0 0 208px; min-height: 100px; margin: 0; grid-template-columns: 28px minmax(0, 1fr) auto; align-content: start; }
+.segment-queue .line-item { position: relative; }
+.segment-queue .line-select { position: absolute; z-index: 1; inset: 0; width: 100%; border: 0; border-radius: inherit; background: transparent; cursor: pointer; }
+.segment-queue .line-select:focus-visible { outline: 2px solid var(--acid); outline-offset: -2px; }
+.segment-queue .line-play,.segment-queue .queue-state { position: relative; z-index: 2; pointer-events: none; }
 .segment-queue .line-copy { min-width: 0; }
+.segment-queue .line-copy { position: relative; z-index: 2; }
 .segment-queue .line-copy textarea { height: 54px; min-height: 54px; resize: none; overflow: hidden; line-height: 1.32; }
 .segment-queue .queue-state { margin-top: 1px; }
 
@@ -642,4 +647,20 @@ h1 em { color: #397c5d; font-style: normal; }
   .studio-result-player video { max-height: 54vh; }
   .studio-result-actions { align-items: stretch; flex-direction: column; }
   .studio-result-actions > button { min-height: 48px; justify-content: center; }
+}
+
+/* Small phones must keep the whole recording action visible without creating
+   a second page scroll. These values only engage on short viewports. */
+@media (max-width: 720px) and (max-height: 720px) {
+  .studio-app-shell.is-recording-stage .dub-console-header { min-height: 48px; padding-block: 7px; }
+  .studio-app-shell.is-recording-stage .segment-video-wrap { height: clamp(126px,27svh,178px); }
+  .studio-app-shell.is-recording-stage .active-caption { padding-block: 6px; }
+  .studio-app-shell.is-recording-stage .active-caption textarea { min-height: 40px; max-height: 46px; font-size: .74rem; }
+  .studio-app-shell.is-recording-stage .wave-compare-head { padding-block: 4px; }
+  .studio-app-shell.is-recording-stage .live-wave-shell { height: clamp(70px,12svh,94px); }
+  .studio-app-shell.is-recording-stage .record-limit { margin-top: 5px; padding-block: 5px; }
+  .studio-app-shell.is-recording-stage .record-controls { margin-top: 5px; }
+  .studio-app-shell.is-recording-stage .record-controls > button { min-height: 54px; }
+  .studio-app-shell.is-recording-stage .segment-queue { flex-basis: 62px; min-height: 62px; padding-block: 6px; }
+  .studio-app-shell.is-recording-stage .segment-queue .line-item { min-height: 43px; }
 }

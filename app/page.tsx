@@ -791,7 +791,7 @@ export default function Home() {
     setPlayback(null);
   }
 
-  function startTranscription(id: number) {
+  function startTranscription() {
     setLiveTranscript('');
     const browserWindow = window as typeof window & {
       SpeechRecognition?: SpeechRecognitionConstructor;
@@ -976,7 +976,7 @@ export default function Home() {
         setRecordElapsed(Math.min(maximumDuration, (performance.now() - recordStartedAtRef.current) / 1000));
       }, 50);
       recordLimitTimeoutRef.current = window.setTimeout(() => stopRecording('limit'), maximumDuration * 1000);
-      startTranscription(id);
+      startTranscription();
       drawWaveform(analyser);
       const preview = segmentVideoRef.current;
       if (preview) {
@@ -1038,12 +1038,6 @@ export default function Home() {
     latestLevelsRef.current = target.waveform ? [...target.waveform] : Array.from({ length: 96 }, () => 0);
     setLiveTranscript('');
     setRecordElapsed(0);
-  }
-
-  function previousSegment() {
-    const currentIndex = segments.findIndex((item) => item.id === activeSegment);
-    const previous = segments[currentIndex <= 0 ? segments.length - 1 : currentIndex - 1];
-    if (previous) selectSegment(previous.id);
   }
 
   function nextSegment() {
@@ -1398,7 +1392,8 @@ export default function Home() {
                       <div className="segment-queue-scale"><span>1</span><span>{segments.length}</span></div>
                     </div>
                     {segments.map((item) => (
-                      <article className={`line-item ${activeSegment === item.id ? 'is-current' : ''} ${item.state === 'pending' && firstPendingId !== item.id ? 'is-locked' : ''}`} key={item.id} role="button" tabIndex={0} onClick={() => selectSegment(item.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSegment(item.id); } }}>
+                      <article className={`line-item ${activeSegment === item.id ? 'is-current' : ''} ${item.state === 'pending' && firstPendingId !== item.id ? 'is-locked' : ''}`} key={item.id}>
+                        <button className="line-select" type="button" onClick={() => selectSegment(item.id)} aria-label={`Открыть реплику ${item.id}`} />
                         <span className="line-play" aria-hidden="true"><em>{item.id}</em><Play size={15} fill="currentColor" /></span>
                         <div className="line-copy"><span className="timecode">{formatTime(item.start)} — {formatTime(item.end)}</span><textarea rows={2} value={item.text} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()} onChange={(event) => updateText(item.id, event.target.value)} placeholder={transcriptionMode === 'transcribed' ? 'Проверьте текст' : 'Введите текст реплики'} aria-label={`Текст реплики ${item.id}`} /></div>
                         <span className={`queue-state ${item.state === 'ready' ? 'is-ready' : item.state === 'pending' && firstPendingId === item.id ? 'is-next' : 'is-locked'}`}>{item.state === 'ready' ? <Check size={14} /> : item.state === 'pending' && firstPendingId === item.id ? <Mic size={13} /> : <LockKeyhole size={12} />}</span>
