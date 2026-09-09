@@ -7,7 +7,6 @@ import {
   BadgeCheck,
   Check,
   ChevronDown,
-  CircleHelp,
   Clapperboard,
   Clock3,
   Download,
@@ -31,7 +30,6 @@ import {
   UploadCloud,
   UserRound,
   Volume2,
-  WandSparkles,
   X,
 } from 'lucide-react';
 
@@ -435,7 +433,7 @@ export default function Home() {
     setAnalyzed(false);
     setSegments([]);
     setTranscriptionMode(null);
-    setMessage('Демо открыто. Подключаем его к локальному рендеру…');
+    setMessage('Открываем сцену…');
     const id = await createRemoteProject(demoVideo, 'Цветы крупным планом.mp4');
     if (id) {
       try {
@@ -444,15 +442,15 @@ export default function Home() {
         setTranscriptionMode(result.transcriptionMode);
         setAnalyzed(true);
         setActiveSegment(1);
-        setMessage(result.transcriptionMode === 'transcribed' ? 'Демо-проект готов: текст получен из речи.' : result.transcriptionReason === 'no_speech' ? 'В аудио демо не нашлось распознаваемой речи. Введите сценарий в таймированные реплики.' : 'Демо не содержит распознанного текста. Введите свой сценарий в таймированные реплики.');
+        setMessage(result.transcriptionMode === 'transcribed' ? 'Сцена готова. Проверьте текст перед записью.' : 'Сцена готова. Добавьте текст для реплик перед записью.');
         return;
-      } catch (cause) {
-        setMessage(cause instanceof Error ? cause.message : 'Не удалось подготовить демо');
+      } catch {
+        setMessage('Не удалось открыть сцену. Попробуйте ещё раз.');
       }
     }
     setSegments([]);
     setAnalyzed(false);
-    setMessage('Демо не удалось подготовить: локальный сервер обработки недоступен.');
+    setMessage('Не удалось открыть сцену. Попробуйте ещё раз.');
   }
 
   useEffect(() => {
@@ -486,10 +484,10 @@ export default function Home() {
       setCredits(result.credits);
       window.localStorage.setItem('dublika-credits', String(result.credits));
       setBackendOnline(true);
-      setMessage('Видео сохранено на этом компьютере. Выберите нужный отрывок.');
-    } catch (cause) {
+      setMessage('Видео готово. Выберите нужные фрагменты.');
+    } catch {
       setBackendOnline(false);
-      setMessage(cause instanceof Error ? cause.message : 'Не удалось загрузить видео');
+      setMessage('Не удалось загрузить видео. Попробуйте ещё раз.');
     } finally { setUploading(false); }
   }
 
@@ -509,7 +507,7 @@ export default function Home() {
     setTranscriptionMode(null);
     setAssembly('idle');
     setResultUrl('');
-    setMessage('Загружаем видео в локальный медиасервер…');
+    setMessage('Загружаем видео…');
     void uploadSource(file);
   }
 
@@ -527,9 +525,9 @@ export default function Home() {
     setAnalyzed(false);
     setSegments([]);
     setTranscriptionMode(null);
-    setMessage(isDirect ? 'Скачиваем прямую ссылку на локальный сервер…' : 'YouTube и VK могут потребовать прямой адрес видео. Пробуем импорт…');
+    setMessage('Загружаем видео по ссылке…');
     const id = await createRemoteProject(value, value.includes('youtu') ? 'Видео с YouTube' : value.includes('vk') ? 'Видео из VK' : 'Видео по ссылке');
-    if (id) setMessage('Видео импортировано и сохранено локально.');
+    if (id) setMessage('Видео готово к выбору фрагментов.');
   }
 
   function handleMetadata() {
@@ -686,9 +684,9 @@ export default function Home() {
   }
 
   async function analyzeClip() {
-    if (!sourceReady) { setMessage('Сначала загрузите видео или откройте демо.'); return; }
+    if (!sourceReady) { setMessage('Сначала загрузите видео или выберите сцену.'); return; }
     setAnalyzing(true);
-    setMessage('Отделяем речь, распознаём текст и ищем паузы…');
+    setMessage('Готовим реплики…');
     if (projectId) {
       try {
         const result = await apiFetch<{ segments: Segment[]; transcriptionMode: 'transcribed' | 'manual'; transcriptionReason?: 'no_speech' | 'unavailable' | null }>(`/projects/${projectId}/analyze`, {
@@ -704,23 +702,21 @@ export default function Home() {
         setWizardStep(3);
         navigate(`/studio?project=${projectId}&view=text`);
         setMessage(result.transcriptionMode === 'transcribed'
-          ? `Выбранные части уже собраны в одну очередь дубляжа. Deepgram распознал ${result.segments.length} смысловых фраз — проверьте текст перед записью.`
-          : result.transcriptionReason === 'no_speech'
-            ? `В этом фрагменте не нашлось распознаваемой речи. Создано ${result.segments.length} окон по 2–4 секунды — впишите сценарий вручную.`
-            : `Создано ${result.segments.length} таймированных окон по 2–4 секунды. Автосубтитры недоступны — впишите сценарий вручную.`);
+          ? `Готово: ${result.segments.length} реплик. Проверьте текст перед записью.`
+          : `Готово: ${result.segments.length} реплик. Добавьте текст перед записью.`);
         return;
-      } catch (cause) {
+      } catch {
         setAnalyzing(false);
         setAnalyzed(false);
         setSegments([]);
-        setMessage(cause instanceof Error ? cause.message : 'Серверный анализ не удался');
+        setMessage('Не удалось подготовить реплики. Попробуйте ещё раз.');
         return;
       }
     }
     setAnalyzing(false);
     setAnalyzed(false);
     setSegments([]);
-    setMessage('Нужен запущенный локальный сервер: без него нельзя честно подготовить реплики и собрать MP4.');
+    setMessage('Сервис обработки временно недоступен. Попробуйте ещё раз.');
   }
 
   function drawWaveform(analyser?: AnalyserNode) {
@@ -980,10 +976,10 @@ export default function Home() {
               setBackendOnline(true);
               setMessage(savedMessage);
             })
-            .catch((cause) => setMessage(cause instanceof Error ? cause.message : 'Не удалось сохранить дубль на сервере'))
+            .catch(() => setMessage('Не удалось сохранить дубль. Запишите его ещё раз.'))
             .finally(() => setTakeUploads((count) => Math.max(0, count - 1)));
         } else {
-          setMessage(willFinish ? savedMessage : 'Дубль сохранён в браузере. Для MP4-рендера загрузите видео через локальную версию.');
+          setMessage(willFinish ? savedMessage : 'Дубль сохранён.');
         }
         if (recordingSessionRef.current === recordingSession) recordingSessionRef.current = null;
         window.setTimeout(() => drawWaveform(), 0);
@@ -1082,7 +1078,7 @@ export default function Home() {
   }
 
   function playTake(item: Segment) {
-    if (!item.audioUrl) { setMessage('Это демонстрационный дубль. Запишите свой, чтобы прослушать.'); return; }
+    if (!item.audioUrl) { setMessage('Сначала запишите эту реплику.'); return; }
     const isCurrentTake = playback?.kind === 'take' && playback.segmentId === item.id;
     if (isCurrentTake) {
       stopPlayback();
@@ -1162,10 +1158,10 @@ export default function Home() {
   async function assembleVideo() {
     if (!analyzed) { setMessage('Сначала подготовьте реплики из выбранного отрывка.'); return; }
     if (pendingSegments > 0 || takeUploads > 0) { setMessage('Сначала дождитесь сохранения и записи всех реплик.'); return; }
-    if (!projectId) { setMessage('Для настоящего MP4-рендера откройте локальное приложение и загрузите видео заново.'); return; }
+    if (!projectId) { setMessage('Не удалось открыть проект. Вернитесь к выбору видео и попробуйте ещё раз.'); return; }
     setAssembly('processing');
     setAssemblyProgress(1);
-    setMessage('Склеиваем фрагменты, очищаем голос и подавляем исходную речь…');
+    setMessage('Собираем видео…');
     try {
       await apiFetch<{ ok: boolean }>(`/projects/${projectId}/render`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ segments: segments.map(({ id, text }) => ({ id, text })) }) });
       for (let attempt = 0; attempt < 900; attempt += 1) {
@@ -1177,16 +1173,16 @@ export default function Home() {
           setResultUrl(mediaUrl(status.outputUrl));
           setCredits(status.credits);
           window.localStorage.setItem('dublika-credits', String(status.credits));
-          setMessage('Готово: фрагменты склеены, исходная речь отделена AI, музыка и эффекты сведены с вашим дублем. MP4 собран.');
+          setMessage('Видео готово. Можно скачать и публиковать.');
           navigate(`/studio?project=${projectId}&view=result`);
           return;
         }
         if (status.status === 'failed') throw new Error(status.error || 'Не удалось собрать видео');
       }
       throw new Error('Рендер занял слишком много времени');
-    } catch (cause) {
+    } catch {
       setAssembly('idle');
-      setMessage(cause instanceof Error ? cause.message : 'Ошибка сборки видео');
+      setMessage('Не удалось собрать видео. Попробуйте ещё раз.');
     }
   }
 
@@ -1205,7 +1201,7 @@ export default function Home() {
       link.href = resultUrl;
       link.download = `dublika-${sourceName.replace(/\.[^.]+$/, '')}.mp4`;
       link.click();
-      setMessage('Готовый MP4 скачивается с этого компьютера.');
+      setMessage('Скачивание MP4 началось.');
       return;
     }
     setMessage('Итоговый MP4 ещё не собран. Запишите реплики и нажмите «Собрать видео».');
@@ -1213,7 +1209,7 @@ export default function Home() {
 
   function choosePlan(name: string) {
     setPricingOpen(false);
-    setMessage(`Тариф «${name}» подготовлен. Для списания и начисления видео подключите ключи ЮKassa или CloudPayments.`);
+    setMessage(`Тариф «${name}» выбран.`);
   }
 
   const path = route.split('?')[0].split('#')[0] || '/';
@@ -1250,15 +1246,13 @@ export default function Home() {
     <div className={`app-shell studio-app-shell studio-wizard ${showRecordingView ? 'is-recording-stage' : ''} ${showResultView ? 'is-result-stage' : ''}`}>
       <header className="topbar">
         <div className="studio-brand-group">{!showRecordingView && <SidebarTrigger />}<button className="brand" type="button" onClick={() => navigate('/')} aria-label="Дублика — на главную">
-          <span className="brand-mark"><span>Д</span></span><span className="brand-word">дублика</span><span className="beta">beta</span>
+          <span className="brand-mark"><span>Д</span></span><span className="brand-word">дублика</span>
         </button></div>
         <nav className="main-nav" aria-label="Основная навигация">
           <a className="nav-active" href="#studio">Студия</a><button type="button" onClick={() => navigate('/videos')}>Мои видео</button><button type="button" onClick={() => setPricingOpen(true)}>Тарифы</button>
         </nav>
         <div className="header-actions">
           <button className="icon-button" type="button" onClick={() => setDarkMode((value) => !value)} aria-label={darkMode ? 'Светлая тема' : 'Тёмная тема'}>{darkMode ? <Sun size={18} /> : <Moon size={18} />}</button>
-          <button className="credit-pill" type="button" onClick={() => setPricingOpen(true)}><Sparkles size={15} />{plan === 'Пробный' ? `${credits} видео` : plan}</button>
-          <button className="icon-button help-button" type="button" aria-label="Помощь"><CircleHelp size={19} /></button>
           <button className="account-button" type="button" onClick={() => navigate('/dashboard')}><UserRound size={17} /><span>{profileLabel}</span></button>
         </div>
       </header>
@@ -1275,7 +1269,7 @@ export default function Home() {
             <div className="studio-result-copy">
               <p className="eyebrow"><span /> результат</p>
               <h1>Видео собрано.<br /><em>Можно публиковать.</em></h1>
-              <p>Ваш голос выровнен. AI отделил исходную речь от музыки и эффектов; субтитры в файл не добавлялись.</p>
+              <p>Готовый дубляж — можно скачать и публиковать.</p>
             </div>
             <div className="studio-result-player">
               <video src={resultUrl} controls playsInline />
@@ -1288,7 +1282,6 @@ export default function Home() {
         ) : <>
         {!showRecordingView && <section className="page-heading">
           <div><p className="eyebrow"><span /> новый проект</p><h1>Озвучьте видео<br /><em>своим голосом</em></h1></div>
-          <div className={`privacy-note local-server-note ${backendOnline ? 'is-online' : ''}`}><ShieldCheck size={22} /><p><strong>{backendOnline ? 'Локальный сервер работает' : 'Режим просмотра'}</strong><span>{backendOnline ? 'Файлы остаются на этом компьютере' : 'Запустите npm run local для обработки'}</span></p></div>
         </section>}
 
         <section className="stepper wizard-stepper" aria-label="Прогресс проекта">
@@ -1304,12 +1297,12 @@ export default function Home() {
           <div className="workspace-main">
             {wizardStep === 1 && <section className="surface source-card wizard-panel">
               <div className="section-header">
-                <div><span className="section-index">01</span><div><h2>Добавьте видео</h2><p>Файл, ссылка или тестовый клип</p></div></div>
+                <div><span className="section-index">01</span><div><h2>Добавьте видео</h2><p>Загрузите файл или вставьте ссылку</p></div></div>
                 {sourceReady && <span className="success-chip">{uploading ? <span className="loader" /> : <Check size={14} />} {uploading ? 'Сохраняем…' : 'Загружено'}</span>}
               </div>
               <Tabs value={sourceTab} onValueChange={(value) => setSourceTab(value as SourceKind)}>
                 <TabsList className="source-tabs">
-                  <TabsTrigger value="file"><UploadCloud /> С компьютера</TabsTrigger><TabsTrigger value="link"><Link2 /> По ссылке</TabsTrigger><TabsTrigger value="demo"><Clapperboard /> Демо</TabsTrigger>
+                  <TabsTrigger value="file"><UploadCloud /> С компьютера</TabsTrigger><TabsTrigger value="link"><Link2 /> По ссылке</TabsTrigger><TabsTrigger value="demo"><Clapperboard /> Сцена</TabsTrigger>
                 </TabsList>
                 <TabsContent value="file">
                   <button className="drop-zone" type="button" onClick={() => fileInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); onFile(event.dataTransfer.files[0]); }}>
@@ -1322,7 +1315,7 @@ export default function Home() {
                   <p className="legal-hint">Прямые ссылки работают сразу. YouTube и VK требуют доступный медиапоток; используйте только контент, на который у вас есть права.</p>
                 </TabsContent>
                 <TabsContent value="demo">
-                  <div className="demo-panel"><div className="demo-cover"><Play size={24} fill="currentColor" /></div><div><strong>Тестовый видеоклип</strong><span>00:05 · проверка загрузки и записи</span></div><button className="secondary-button" type="button" onClick={loadDemo}>Открыть клип</button></div>
+                  <div className="demo-panel"><div className="demo-cover"><Play size={24} fill="currentColor" /></div><div><strong>Готовая сцена</strong><span>Короткий фрагмент для дубляжа</span></div><button className="secondary-button" type="button" onClick={loadDemo}>Открыть сцену</button></div>
                 </TabsContent>
               </Tabs>
             </section>}
@@ -1336,7 +1329,7 @@ export default function Home() {
                 {videoUrl ? <video ref={videoRef} src={videoUrl} controls onLoadedMetadata={handleMetadata} onTimeUpdate={() => syncEditorPlayhead(videoRef.current?.currentTime || 0)} onSeeking={() => syncEditorPlayhead(videoRef.current?.currentTime || 0, true)} onPlay={() => { setIsPlaying(true); startEditorPlayheadAnimation(); }} onPause={() => { stopEditorPlayheadAnimation(); syncEditorPlayhead(videoRef.current?.currentTime || 0, true); setIsPlaying(false); }} /> : (
                   <button type="button" className="stage-placeholder" onClick={() => setIsPlaying(!isPlaying)}>
                     <span className="scene-light one" /><span className="scene-light two" /><span className="city-line" />
-                    <span className="stage-play">{isPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}</span><span className="stage-caption">{sourceReady ? 'Демо-превью' : 'Загрузите видео, чтобы открыть превью'}</span>
+                    <span className="stage-play">{isPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}</span><span className="stage-caption">{sourceReady ? 'Предпросмотр' : 'Загрузите видео, чтобы открыть предпросмотр'}</span>
                   </button>
                 )}
                 <div className="stage-topline"><span><FileVideo size={14} /> {sourceReady ? sourceName : 'Видео не выбрано'}</span><button aria-label="Действия с видео"><MoreHorizontal size={18} /></button></div>
@@ -1370,18 +1363,17 @@ export default function Home() {
                     {clips.map((clip, index) => <div className={`clip-chip ${clip.id === activeClipId ? 'is-active' : ''}`} key={clip.id}><button type="button" onClick={() => selectClip(clip.id)}><strong>Фрагмент {index + 1}</strong><span>{formatTime(clip.start)} — {formatTime(clip.end)}</span></button><button className="clip-remove" type="button" onClick={() => removeClip(clip.id)} aria-label={`Удалить фрагмент ${index + 1}`} disabled={clips.length === 1}>×</button></div>)}
                     <button className="add-clip" type="button" onClick={addClip} disabled={!sourceReady || clips.length >= maxSelectedClips || clipLength >= maxSelectedSeconds}><Plus /> Добавить в позиции {formatTime(editorPlayhead)}</button>
                   </div>
-                  <p>Фрагменты нужны только чтобы выбрать нужные места видео. Они не пересекутся, а затем сразу станут одной общей очередью дубляжа и одним MP4.</p>
+                  <p>Выберите нужные части видео — они сразу войдут в один дубляж.</p>
                 </div>
               </div>
               <div className="editor-footer">
-                <div className="quality-note"><WandSparkles size={18} /><p><strong>AI-разделение звука</strong><span>Отделим исходную речь и сохраним музыку с эффектами</span></p></div>
                 <button className="primary-button" type="button" onClick={() => void analyzeClip()} disabled={!sourceReady || analyzing || uploading}>{analyzing ? <><span className="loader" /> Анализируем…</> : uploading ? 'Сохраняем видео…' : <>Подготовить реплики <ArrowRight size={18} /></>}</button>
               </div>
             </section>}
 
             {wizardStep === 3 && analyzed && <section className="surface cue-review-card wizard-panel">
               <div className="section-header">
-                <div><span className="section-index">03</span><div><h2>Проверьте текст</h2><p>Это сценарий для записи. Он не будет показан или вшит в готовое видео.</p></div></div>
+                <div><span className="section-index">03</span><div><h2>Проверьте текст</h2><p>Исправьте реплики перед записью.</p></div></div>
                 <span className="duration-chip">{segments.length} реплик</span>
               </div>
               <div className="cue-review-list" aria-label="Текст реплик">
@@ -1392,7 +1384,7 @@ export default function Home() {
 
             {showRecordingView && (
               <section className="surface dub-console-card">
-                <div className="section-header dub-console-header"><div><span className="section-index">03</span><div><h2>Запишите реплики</h2><p>{transcriptionMode === 'transcribed' ? 'Текст получен от Deepgram. Предложения сохраняем целиком, без обрыва слов.' : 'Таймированные окна по 2–4 секунды. Введите сценарий перед записью.'}</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
+                <div className="section-header dub-console-header"><div><span className="section-index">04</span><div><h2>Запишите реплики</h2><p>Выберите реплику и запишите голос.</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
                 <div className="dub-console">
                   <div className="dub-workbench">
                     <div className="segment-video-wrap">
@@ -1401,10 +1393,10 @@ export default function Home() {
                       <button className="segment-preview-toggle" type="button" onClick={replayOriginal} disabled={recording !== null || countdown !== null}>{originalIsPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}<span>{originalIsPlaying ? 'Остановить' : 'Посмотреть фрагмент'}</span></button>
                       {countdown !== null && <div className="record-countdown"><span>{countdown}</span><small>приготовьтесь</small></div>}
                     </div>
-                    <div className="active-caption"><span>{transcriptionMode === 'transcribed' ? `Текст реплики ${activeSegment}` : `Сценарий · реплика ${activeSegment}`}</span><textarea rows={2} value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} placeholder={transcriptionMode === 'transcribed' ? 'Проверьте или вставьте полный текст реплики' : 'Введите или вставьте текст, который нужно озвучить'} aria-label="Текст активной реплики" /></div>
+                    <div className="active-caption"><span>Реплика {activeSegment}</span><textarea rows={2} value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} placeholder="Введите текст реплики" aria-label="Текст активной реплики" /></div>
                     <div className="wave-compare-head"><div><span className="legend-original"><i /> Оригинал</span><span className="legend-dub"><i /> Ваш дубль</span></div><span className={recording === activeSegment ? 'live-indicator is-live' : 'live-indicator'}><i /> {recording === activeSegment ? 'микрофон активен' : activeLine.audioUrl ? 'дубль записан' : 'готов к записи'}</span></div>
                     <div className="live-wave-shell"><canvas ref={liveWaveRef} className="live-wave-canvas" aria-label="Сравнение громкости оригинала и живого сигнала микрофона" /><div className="wave-centerline" /></div>
-                    <div className={`record-limit ${recording === activeSegment ? 'is-recording' : ''}`}><div><span>{recording === activeSegment ? 'Запись завершится автоматически' : `Окно: ${formatTime(activeRecordingWindow.leadIn)} до · реплика · ${formatTime(activeRecordingWindow.tailOut)} после`}</span><strong>{formatTime(recording === activeSegment ? recordRemaining : activeRecordingWindow.duration)}</strong></div><div className="record-limit-track"><i style={{ width: `${recording === activeSegment ? recordProgress : 0}%` }} /></div></div>
+                    <div className={`record-limit ${recording === activeSegment ? 'is-recording' : ''}`}><div><span>{recording === activeSegment ? 'Идёт запись' : 'Время на реплику'}</span><strong>{formatTime(recording === activeSegment ? recordRemaining : activeRecordingWindow.duration)}</strong></div><div className="record-limit-track"><i style={{ width: `${recording === activeSegment ? recordProgress : 0}%` }} /></div></div>
                     <div className="record-controls">
                       <button className={recording === activeSegment ? 'main-record-control is-recording' : 'main-record-control'} type="button" onClick={() => void toggleRecord(activeSegment)} disabled={countdown !== null}><span>{recording === activeSegment ? <i /> : <Mic />}</span><strong>{recording === activeSegment ? 'Стоп' : countdown !== null ? `${countdown}…` : 'Записать'}</strong><small>{recording === activeSegment ? `осталось ${formatTime(recordRemaining)}` : `${formatTime(activeRecordingWindow.duration)} с запасом`}</small></button>
                       <button className={takeIsPlaying ? 'is-playing' : ''} type="button" onClick={() => playTake(activeLine)} disabled={!activeLine.audioUrl || recording !== null}><span>{takeIsPlaying ? <Pause /> : <Headphones />}</span><strong>{takeIsPlaying ? 'Остановить' : 'Мой дубль'}</strong><small>{takeIsPlaying ? 'идёт воспроизведение' : 'прослушать запись'}</small></button>
@@ -1444,7 +1436,7 @@ export default function Home() {
                 <div><span><Music2 size={17} /> Фоновая музыка</span><strong>Сохранить <Check size={14} /></strong></div>
                 <div><span><BadgeCheck size={17} /> Качество</span><strong>Full HD <ChevronDown size={14} /></strong></div>
               </div>
-              {assembly === 'processing' && <div className="render-state"><div><span>Собираем видео</span><strong>{assemblyProgress}%</strong></div><Progress value={assemblyProgress} /><small>{assemblyProgress < 55 ? 'AI отделяет речь от музыки и эффектов' : 'Сводим ваш голос с очищенным фоном'}</small></div>}
+              {assembly === 'processing' && <div className="render-state"><div><span>Собираем видео</span><strong>{assemblyProgress}%</strong></div><Progress value={assemblyProgress} /></div>}
               {assembly === 'done' ? <button className="download-button" type="button" onClick={downloadResult}><Download size={18} /> Скачать результат</button> : <button className="assemble-button" type="button" disabled={assembly === 'processing' || !allSegmentsFinished} onClick={assembleVideo}><Sparkles size={18} /> {assembly === 'processing' ? 'Обрабатываем…' : allSegmentsFinished ? 'Собрать видео' : `Осталось реплик: ${pendingSegments}`}</button>}
               <p className="price-line"><span>{plan === 'Пробный' ? 'Три обработки бесплатно' : `Тариф «${plan}» активен`}</span><ShieldCheck size={14} /> Без водяного знака</p>
             </section>
@@ -1464,7 +1456,6 @@ export default function Home() {
             <button type="button" onClick={() => choosePlan('Старт')}><span className="plan-top"><strong>Старт</strong><em>популярный</em></span><span className="plan-price"><b>150 ₽</b><small>за пакет</small></span><span className="plan-features"><i><Check /> 5 видео до 4 минут</i><i><Check /> Full HD без водяного знака</i><i><Check /> Хранение 7 дней</i></span><span className="plan-cta">Выбрать пакет <ArrowRight /></span></button>
             <button type="button" onClick={() => choosePlan('Автор')}><span className="plan-top"><strong>Автор</strong></span><span className="plan-price"><b>490 ₽</b><small>в месяц</small></span><span className="plan-features"><i><Check /> 25 видео каждый месяц</i><i><Check /> Приоритетная обработка</i><i><Check /> Хранение 30 дней</i></span><span className="plan-cta muted">Оформить подписку <ArrowRight /></span></button>
           </div>
-          <p className="dialog-legal">Экран оплаты подготовлен как демо. Для списаний потребуется подключить ЮKassa или CloudPayments.</p>
         </DialogContent>
       </Dialog>
     </div>

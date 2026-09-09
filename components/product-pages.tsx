@@ -280,12 +280,12 @@ function AuthPage(props: PageProps) {
       setDevCode(result.devCode);
       setError('');
       setStep('code');
-      props.notify(`Код создан локально для ${email}`);
+      props.notify('Код для входа готов.');
     } catch {
       setDevCode('241806');
       setError('');
       setStep('code');
-      props.notify('В опубликованном демо используйте код 241806. Для реальной обработки запустите локальную версию.');
+      props.notify('Не удалось отправить код. Попробуйте ещё раз.');
     } finally { setSubmitting(false); }
   }
 
@@ -332,7 +332,7 @@ function AuthPage(props: PageProps) {
               <InputOTP maxLength={6} value={code} onChange={setCode} containerClassName="otp-input">
                 <InputOTPGroup>{Array.from({ length: 6 }, (_, index) => <InputOTPSlot index={index} key={index} className="otp-slot" />)}</InputOTPGroup>
               </InputOTP>
-              <div className="demo-code"><BadgeCheck /> Код для локального входа: <strong>{devCode}</strong></div>
+              <div className="demo-code"><BadgeCheck /> Код для входа: <strong>{devCode}</strong></div>
               {error && <p className="auth-error">{error}</p>}
               <button className="auth-submit" type="button" disabled={submitting} onClick={() => void verify()}>{submitting ? 'Проверяем…' : 'Войти в Дублику'} <ArrowRight /></button>
               <button className="resend-button" type="button" onClick={() => void sendCode()}>Отправить код ещё раз</button>
@@ -358,11 +358,10 @@ export function AppSidebar({ route, navigate }: { route: string; navigate: Navig
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
-        <div className="sidebar-trial"><span><Sparkles /> Бесплатный план</span><strong>3 видео осталось</strong><Progress value={100} /><button type="button">Выбрать тариф</button></div>
       </SidebarContent>
       <SidebarFooter>
         <SidebarMenu><SidebarMenuItem><SidebarMenuButton tooltip="Настройки" isActive={route === '/settings'} onClick={() => navigate('/settings')}><Settings /><span>Настройки</span></SidebarMenuButton></SidebarMenuItem></SidebarMenu>
-        <button className="sidebar-user" type="button" onClick={() => navigate('/settings')}><span>{profileName.slice(0, 1).toUpperCase()}</span><div><strong>{profileName}</strong><small>Бесплатный</small></div><ChevronRight /></button>
+        <button className="sidebar-user" type="button" onClick={() => navigate('/settings')}><span>{profileName.slice(0, 1).toUpperCase()}</span><div><strong>{profileName}</strong></div><ChevronRight /></button>
       </SidebarFooter>
     </Sidebar>
   );
@@ -370,7 +369,7 @@ export function AppSidebar({ route, navigate }: { route: string; navigate: Navig
 
 function DashboardHeader(props: PageProps) {
   const profileName = useProfileName();
-  return <header className="dashboard-topbar"><SidebarTrigger><Menu /></SidebarTrigger><div className="dashboard-crumb"><span>Дублика</span><ChevronRight /><strong>{menuItems.find((item) => item.path === props.route)?.label || 'Кабинет'}</strong></div><div><ThemeButton darkMode={props.darkMode} toggleTheme={props.toggleTheme} /><button className="dashboard-trial" type="button"><Sparkles /> 3 видео</button><button className="dashboard-avatar" type="button" aria-label="Открыть настройки">{profileName.slice(0, 1).toUpperCase()}</button></div></header>;
+  return <header className="dashboard-topbar"><SidebarTrigger><Menu /></SidebarTrigger><div className="dashboard-crumb"><span>Дублика</span><ChevronRight /><strong>{menuItems.find((item) => item.path === props.route)?.label || 'Кабинет'}</strong></div><div><ThemeButton darkMode={props.darkMode} toggleTheme={props.toggleTheme} /><button className="dashboard-avatar" type="button" aria-label="Открыть настройки">{profileName.slice(0, 1).toUpperCase()}</button></div></header>;
 }
 
 function DashboardHome({ navigate }: Pick<PageProps, 'navigate'>) {
@@ -424,7 +423,7 @@ function VideosPage({ navigate }: Pick<PageProps, 'navigate'>) {
   const drafts = projects.filter((project) => project.status !== 'done').length;
   const completed = projects.filter((project) => project.status === 'done').length;
   const statusLabel: Record<LibraryProject['status'], string> = { uploaded: 'Видео загружено', ready: 'Черновик', processing: 'Собирается', done: 'Готово', failed: 'Нужна проверка' };
-  return <div className="dashboard-content"><section className="inner-heading"><div><span>ваша библиотека</span><h1>Мои видео</h1><p>Черновики, готовые дубляжи и общие проекты.</p></div><button onClick={() => navigate('/studio')}><Plus /> Новое видео</button></section><div className="library-tabs"><button className={filter === 'all' ? 'is-active' : ''} onClick={() => setFilter('all')}>Все <span>{projects.length}</span></button><button className={filter === 'draft' ? 'is-active' : ''} onClick={() => setFilter('draft')}>Черновики <span>{drafts}</span></button><button className={filter === 'done' ? 'is-active' : ''} onClick={() => setFilter('done')}>Готовые <span>{completed}</span></button></div>{loading ? <section className="library-empty"><div className="empty-reel"><Film /><span /></div><h2>Загружаем библиотеку…</h2><p>Проверяем проекты на локальном медиасервере.</p></section> : error ? <section className="library-empty"><div className="empty-reel"><FileVideo /><span /></div><h2>Библиотека пока недоступна</h2><p>{error}</p><button onClick={() => window.location.reload()}>Повторить <ArrowRight /></button></section> : visible.length ? <section className="video-library">{visible.map((project) => <article key={project.id}><div className="video-library-thumb"><Film /><span>{project.status === 'done' ? <BadgeCheck /> : <FileVideo />}</span></div><div className="video-library-copy"><span>{statusLabel[project.status]}</span><h2>{project.title.replace(/\.[^.]+$/, '')}</h2><p>{libraryDuration(project)} · {project.segments?.length || 0} реплик · {project.clips?.length || 1} фрагм.</p>{project.status === 'processing' && <Progress value={project.progress || 0} />}</div><div className="video-library-actions">{project.status === 'done' && project.outputUrl && <a href={mediaUrl(project.outputUrl)} target="_blank" rel="noreferrer"><Play /> Открыть MP4</a>}<button type="button" onClick={() => navigate(`/studio?project=${project.id}`)}>{project.status === 'done' ? 'Открыть проект' : 'Продолжить'} <ArrowRight /></button></div></article>)}</section> : <section className="library-empty"><div className="empty-reel"><Film /><span /></div><h2>Пока ни одного видео</h2><p>Первый дубляж займёт несколько минут. Выберите готовую сцену или загрузите свою.</p><button onClick={() => navigate('/studio')}>Создать видео <ArrowRight /></button></section>}</div>;
+  return <div className="dashboard-content"><section className="inner-heading"><div><span>ваша библиотека</span><h1>Мои видео</h1><p>Черновики, готовые дубляжи и общие проекты.</p></div><button onClick={() => navigate('/studio')}><Plus /> Новое видео</button></section><div className="library-tabs"><button className={filter === 'all' ? 'is-active' : ''} onClick={() => setFilter('all')}>Все <span>{projects.length}</span></button><button className={filter === 'draft' ? 'is-active' : ''} onClick={() => setFilter('draft')}>Черновики <span>{drafts}</span></button><button className={filter === 'done' ? 'is-active' : ''} onClick={() => setFilter('done')}>Готовые <span>{completed}</span></button></div>{loading ? <section className="library-empty"><div className="empty-reel"><Film /><span /></div><h2>Загружаем библиотеку…</h2><p>Собираем ваши проекты.</p></section> : error ? <section className="library-empty"><div className="empty-reel"><FileVideo /><span /></div><h2>Библиотека пока недоступна</h2><p>{error}</p><button onClick={() => window.location.reload()}>Повторить <ArrowRight /></button></section> : visible.length ? <section className="video-library">{visible.map((project) => <article key={project.id}><div className="video-library-thumb"><Film /><span>{project.status === 'done' ? <BadgeCheck /> : <FileVideo />}</span></div><div className="video-library-copy"><span>{statusLabel[project.status]}</span><h2>{project.title.replace(/\.[^.]+$/, '')}</h2><p>{libraryDuration(project)} · {project.segments?.length || 0} реплик · {project.clips?.length || 1} фрагм.</p>{project.status === 'processing' && <Progress value={project.progress || 0} />}</div><div className="video-library-actions">{project.status === 'done' && project.outputUrl && <a href={mediaUrl(project.outputUrl)} target="_blank" rel="noreferrer"><Play /> Открыть MP4</a>}<button type="button" onClick={() => navigate(`/studio?project=${project.id}`)}>{project.status === 'done' ? 'Открыть проект' : 'Продолжить'} <ArrowRight /></button></div></article>)}</section> : <section className="library-empty"><div className="empty-reel"><Film /><span /></div><h2>Пока ни одного видео</h2><p>Первый дубляж займёт несколько минут. Выберите готовую сцену или загрузите свою.</p><button onClick={() => navigate('/studio')}>Создать видео <ArrowRight /></button></section>}</div>;
 }
 
 function GuidePage({ navigate }: Pick<PageProps, 'navigate'>) {
