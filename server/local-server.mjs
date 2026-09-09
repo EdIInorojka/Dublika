@@ -774,7 +774,10 @@ async function downloadWithYtDlp(value, destination, platform) {
   const url = await validateRemoteUrl(value);
   const ffmpegDirectory = resolve(ffmpegPath, '..');
   const format = platform ? 'bv*[height<=1080]+ba/b[height<=1080]' : 'best';
-  await runProcess(ytDlpPath, ['--no-playlist', '--no-warnings', '--no-part', '--max-filesize', '1G', '--format', format, '--merge-output-format', 'mp4', '--ffmpeg-location', ffmpegDirectory, '--output', destination, url.toString()]);
+  // YouTube increasingly requires its player JavaScript while negotiating
+  // formats. Pinning the already-installed Node runtime prevents yt-dlp from
+  // silently falling back to its incomplete no-JS extractor.
+  await runProcess(ytDlpPath, ['--no-playlist', '--no-warnings', '--no-part', '--max-filesize', '1G', '--js-runtimes', 'node', '--format', format, '--merge-output-format', 'mp4', '--ffmpeg-location', ffmpegDirectory, '--output', destination, url.toString()]);
   if (!existsSync(destination)) throw new Error('Видео не было сохранено');
   return statSync(destination).size;
 }
