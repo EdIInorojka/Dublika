@@ -16,6 +16,7 @@ const uploadDir = join(dataDir, 'uploads');
 const recordingDir = join(dataDir, 'recordings');
 const outputDir = join(dataDir, 'outputs');
 const stemsDir = join(dataDir, 'stems');
+const thumbnailDir = join(dataDir, 'thumbnails');
 const ytDlpPath = join(root, '.local-bin', 'yt-dlp.exe');
 const demucsPythonPath = process.env.DUBLIKA_DEMUCS_PYTHON || join(root, '.local-bin', 'demucs-venv', 'Scripts', 'python.exe');
 const demucsModel = process.env.DUBLIKA_DEMUCS_MODEL || 'htdemucs';
@@ -28,7 +29,7 @@ const maxAudioBytes = 40 * 1024 * 1024;
 const maxSelectedSeconds = 240;
 const minSegmentSeconds = 2;
 const maxSegmentSeconds = 4;
-const maxNaturalSentenceSeconds = 4.8;
+const maxNaturalSentenceSeconds = 4;
 const recordingLeadSeconds = 1;
 const recordingTailSeconds = 1;
 const mediaTokenLifetimeMs = 7 * 24 * 60 * 60 * 1000;
@@ -46,7 +47,7 @@ const allowedOrigins = new Set([
   ...String(process.env.DUBLIKA_ALLOWED_ORIGINS || '').split(',').map((origin) => origin.trim()).filter(Boolean),
 ]);
 
-for (const directory of [dataDir, uploadDir, recordingDir, outputDir, stemsDir]) mkdirSync(directory, { recursive: true });
+for (const directory of [dataDir, uploadDir, recordingDir, outputDir, stemsDir, thumbnailDir]) mkdirSync(directory, { recursive: true });
 
 function initialState() {
   return { secret: randomBytes(32).toString('hex'), users: {}, devices: {}, projects: {} };
@@ -187,6 +188,10 @@ function outputMediaUrl(project) {
   return `/media/outputs/${project.id}.mp4?access=${encodeURIComponent(signMediaToken(project.id, 'output'))}&realm=${activeStore().realm}`;
 }
 
+function thumbnailMediaUrl(project, index) {
+  return `/media/projects/${project.id}/thumbnails/${index}?access=${encodeURIComponent(signMediaToken(project.id, `thumbnail:${index}`))}&realm=${activeStore().realm}`;
+}
+
 function tokenUser(request) {
   const token = String(request.headers.authorization || '').replace(/^Bearer\s+/i, '');
   const [payload, signature] = token.split('.');
@@ -318,6 +323,46 @@ async function sourceHasAudio(path) {
   try { await runFfmpeg(['-hide_banner', '-i', path, '-map', '0:a:0', '-t', '0.1', '-f', 'null', '-']); return true; } catch { return false; }
 }
 
+async function videoDuration(path) {
+  try {
+    const report = await runFfmpeg(['-hide_banner', '-i', path, '-map', '0:v:0', '-t', '0.02', '-f', 'null', '-']);
+    const match = report.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i);
+    if (!match) return 0;
+    return rounded(Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]));
+  } catch {
+    return 0;
+  }
+}
+
+async function durationForProject(project) {
+  if (Number.isFinite(project.duration) && project.duration > 0) return project.duration;
+  const duration = await videoDuration(project.inputPath);
+  if (duration > 0) {
+    project.duration = duration;
+    saveState();
+  }
+  return duration;
+}
+
+async function thumbnailsForProject(project, requestedCount = 12) {
+  const duration = await durationForProject(project);
+  if (!(duration > 0)) return { duration: 0, thumbnails: [] };
+  const count = Math.max(1, Math.min(16, Number(requestedCount) || 12));
+  const projectDirectory = join(thumbnailDir, project.id);
+  mkdirSync(projectDirectory, { recursive: true });
+  await Promise.all(Array.from({ length: count }, async (_, index) => {
+    const destination = join(projectDirectory, `${index}.jpg`);
+    if (existsSync(destination) && statSync(destination).size > 600) return;
+    const position = Math.min(Math.max(.02, duration - .02), duration * ((index + .5) / count));
+    await runFfmpeg([
+      '-y', '-ss', position.toFixed(3), '-i', project.inputPath,
+      '-frames:v', '1', '-vf', 'scale=240:-2:force_original_aspect_ratio=decrease',
+      '-q:v', '4', destination,
+    ]);
+  }));
+  return { duration, thumbnails: Array.from({ length: count }, (_, index) => thumbnailMediaUrl(project, index)) };
+}
+
 function stemCacheKey(project, clips) {
   const source = statSync(project.inputPath);
   return createHash('sha256')
@@ -397,22 +442,21 @@ async function waveformForRange(project, start, end) {
     }
     rawLevels.push(Math.sqrt(sum / Math.max(1, to - from)));
   }
-  // These levels drive a visual editor, not a loudness meter. Normalising the
-  // real samples per source keeps a quiet original track and a phone mic on
-  // the same readable scale while preserving every peak and pause.
-  const reference = Math.max(0.018, ...rawLevels);
-  return rawLevels.map((level) => rounded(Math.min(.92, Math.pow(level / reference, .72) * .9)));
+  // Preserve the actual level. The browser draws the original and microphone
+  // against one shared scale so equal loudness has equal height on screen.
+  return rawLevels.map((level) => rounded(Math.min(1, Math.max(0, level))));
 }
 
 async function waveformForSegment(project, segment) {
   const cached = project.waveforms?.[segment.id];
-  if (Array.isArray(cached) && cached.length === 96) return cached;
+  if (project.waveformVersion === 2 && Array.isArray(cached) && cached.length === 96) return cached;
   const sourceClip = segmentClip(project, segment);
   const waveformStart = Math.max(sourceClip.start, segment.start - recordingLeadSeconds);
   const waveformEnd = Math.min(sourceClip.end, segment.end + recordingTailSeconds);
   const levels = await waveformForRange(project, waveformStart, waveformEnd);
   project.waveforms ??= {};
   project.waveforms[segment.id] = levels;
+  project.waveformVersion = 2;
   saveState();
   return levels;
 }
@@ -557,10 +601,25 @@ function phraseSegments(units, clipStart, clipEnd) {
   for (const nextGroup of rawGroups) {
     const previous = groups[groups.length - 1];
     const nextDuration = nextGroup[nextGroup.length - 1].end - nextGroup[0].start;
-    if (previous && nextDuration < minSegmentSeconds && nextGroup[nextGroup.length - 1].end - previous[0].start <= maxNaturalSentenceSeconds + 0.25) {
+    // A one-word answer at the end of a thought is never useful as a separate
+    // recording turn. Keep it with the preceding sentence even when that
+    // produces a slightly longer natural line rather than an unusable 0.9 s
+    // fragment.
+    if (previous && nextDuration < minSegmentSeconds) {
       previous.push(...nextGroup);
     } else {
       groups.push(nextGroup);
+    }
+  }
+
+  for (let index = groups.length - 2; index >= 0; index -= 1) {
+    const current = groups[index];
+    const next = groups[index + 1];
+    const currentDuration = current[current.length - 1].end - current[0].start;
+    const combinedDuration = next[next.length - 1].end - current[0].start;
+    if (currentDuration < minSegmentSeconds && combinedDuration <= maxNaturalSentenceSeconds + minSegmentSeconds) {
+      current.push(...next);
+      groups.splice(index + 1, 1);
     }
   }
 
@@ -568,7 +627,7 @@ function phraseSegments(units, clipStart, clipEnd) {
     start: rounded(Math.max(clipStart, sentence[0].start)),
     end: rounded(Math.min(clipEnd, sentence[sentence.length - 1].end)),
     text: sentence.map((unit) => unit.text).join(' ').replace(/\s+([,.!?…;:])/g, '$1').trim(),
-  })).filter((segment) => segment.end - segment.start >= 0.35);
+  })).filter((segment) => segment.end - segment.start >= Math.min(minSegmentSeconds, clipEnd - clipStart));
 }
 
 function projectClips(project) {
@@ -661,10 +720,17 @@ function projectFor(request, id) {
 async function analyzeProject(project, body) {
   const rawClips = Array.isArray(body.clips) && body.clips.length ? body.clips : [{ id: 'clip-1', start: body.start, end: body.end }];
   if (rawClips.length > 6) throw new Error('Можно выбрать не больше 6 фрагментов');
+  const sourceDuration = await durationForProject(project);
+  if (!(sourceDuration >= minSegmentSeconds)) throw badRequest('Не удалось определить длительность видео');
   const clips = rawClips.map((clip, index) => {
-    const start = Math.max(0, Number(clip.start) || 0);
+    const start = Number(clip.start);
     const end = Number(clip.end);
-    return { id: String(clip.id || `clip-${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || `clip-${index + 1}`, start: rounded(start), end: rounded(end) };
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end > sourceDuration + .05) throw badRequest('Границы фрагмента выходят за пределы видео');
+    return {
+      id: String(clip.id || `clip-${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || `clip-${index + 1}`,
+      start: rounded(Math.max(0, start)),
+      end: rounded(Math.min(sourceDuration, end)),
+    };
   }).sort((left, right) => left.start - right.start);
   if (clips.some((clip) => !(clip.end - clip.start >= minSegmentSeconds) || clip.end - clip.start > maxSelectedSeconds)) throw new Error('Каждый фрагмент должен быть от 2 секунд до 4 минут');
   if (clips.some((clip, index) => index > 0 && clip.start < clips[index - 1].end)) throw new Error('Выбранные фрагменты не должны пересекаться');
@@ -896,9 +962,11 @@ async function handleApi(request, response, url) {
     const id = randomUUID();
     const inputPath = join(uploadDir, `${id}${extension}`);
     const size = await saveBody(request, inputPath, maxVideoBytes);
-    state.projects[id] = { id, userId: user.id, title: originalName, inputPath, size, status: 'uploaded', progress: 0, trim: null, segments: [], recordings: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const duration = await videoDuration(inputPath);
+    if (duration < minSegmentSeconds) return sendJson(response, 422, { error: 'Видео должно быть не короче двух секунд' });
+    state.projects[id] = { id, userId: user.id, title: originalName, inputPath, size, duration, status: 'uploaded', progress: 0, trim: null, segments: [], recordings: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     saveState();
-    return sendJson(response, 201, { project: { id, title: originalName, status: 'uploaded', inputUrl: sourceMediaUrl(state.projects[id]) }, credits: user.credits });
+    return sendJson(response, 201, { project: { id, title: originalName, duration, status: 'uploaded', inputUrl: sourceMediaUrl(state.projects[id]) }, credits: user.credits });
   }
 
   if (pathname === '/api/projects/import' && request.method === 'POST') {
@@ -910,10 +978,12 @@ async function handleApi(request, response, url) {
     const inputPath = join(uploadDir, `${id}${extension}`);
     const platformHost = /(^|\.)(youtube\.com|youtu\.be|vk\.com|vkvideo\.ru|vk\.ru|vkontakte\.ru)$/i.test(source.hostname);
     const size = platformHost ? await downloadPlatformVideo(source.toString(), inputPath) : await downloadRemote(source.toString(), inputPath);
+    const duration = await videoDuration(inputPath);
+    if (duration < minSegmentSeconds) return sendJson(response, 422, { error: 'Видео должно быть не короче двух секунд' });
     const title = safeName(body.title || source.pathname.split('/').pop(), 'Видео по ссылке');
-    state.projects[id] = { id, userId: user.id, title, inputPath, size, sourceUrl: source.toString(), status: 'uploaded', progress: 0, trim: null, segments: [], recordings: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    state.projects[id] = { id, userId: user.id, title, inputPath, size, duration, sourceUrl: source.toString(), status: 'uploaded', progress: 0, trim: null, segments: [], recordings: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     saveState();
-    return sendJson(response, 201, { project: { id, title, status: 'uploaded', inputUrl: sourceMediaUrl(state.projects[id]) }, credits: user.credits });
+    return sendJson(response, 201, { project: { id, title, duration, status: 'uploaded', inputUrl: sourceMediaUrl(state.projects[id]) }, credits: user.credits });
   }
 
   if (pathname === '/api/projects' && request.method === 'GET') {
@@ -926,13 +996,21 @@ async function handleApi(request, response, url) {
     return sendJson(response, 200, { projects, credits: user.credits, plan: user.plan });
   }
 
+  const thumbnailsMatch = pathname.match(/^\/api\/projects\/([a-f0-9-]+)\/thumbnails$/i);
+  if (thumbnailsMatch && request.method === 'GET') {
+    const access = projectFor(request, thumbnailsMatch[1]);
+    if (!access) return sendJson(response, 404, { error: 'Проект не найден' });
+    return sendJson(response, 200, await thumbnailsForProject(access.project, Number(url.searchParams.get('count')) || 12));
+  }
+
   const editorWaveformMatch = pathname.match(/^\/api\/projects\/([a-f0-9-]+)\/waveform$/i);
   if (editorWaveformMatch && request.method === 'GET') {
     const access = projectFor(request, editorWaveformMatch[1]);
     if (!access) return sendJson(response, 404, { error: 'Проект не найден' });
     const start = Math.max(0, Number(url.searchParams.get('start')) || 0);
     const requestedEnd = Number(url.searchParams.get('end'));
-    const end = Math.min(start + 240, Math.max(start + .35, Number.isFinite(requestedEnd) ? requestedEnd : start + .35));
+    const duration = await durationForProject(access.project);
+    const end = Math.min(duration || start + 240, start + 240, Math.max(start + .35, Number.isFinite(requestedEnd) ? requestedEnd : start + .35));
     return sendJson(response, 200, { levels: await waveformForRange(access.project, start, end) });
   }
 
@@ -1031,6 +1109,14 @@ const server = createServer((request, response) => stateContext.run(requestStore
       const project = state.projects[projectSource[1]];
       if (!project || !hasMediaToken(url, project.id, 'source')) return sendJson(response, 403, { error: 'Нет доступа к медиафайлу' });
       return project?.inputPath && existsSync(project.inputPath) ? sendFile(request, response, project.inputPath) : sendJson(response, 404, { error: 'Файл не найден' });
+    }
+    const projectThumbnail = url.pathname.match(/^\/media\/projects\/([a-f0-9-]+)\/thumbnails\/([0-9]+)$/i);
+    if (projectThumbnail) {
+      const project = state.projects[projectThumbnail[1]];
+      const index = Number(projectThumbnail[2]);
+      if (!project || !Number.isInteger(index) || index < 0 || index > 15 || !hasMediaToken(url, project.id, `thumbnail:${index}`)) return sendJson(response, 403, { error: 'Нет доступа к медиафайлу' });
+      const path = join(thumbnailDir, project.id, `${index}.jpg`);
+      return existsSync(path) ? sendFile(request, response, path) : sendJson(response, 404, { error: 'Кадр не найден' });
     }
     const projectTake = url.pathname.match(/^\/media\/projects\/([a-f0-9-]+)\/takes\/([0-9]+)$/i);
     if (projectTake) {

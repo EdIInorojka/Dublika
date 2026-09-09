@@ -184,6 +184,9 @@ h1 em { color: #397c5d; font-style: normal; }
 .editor-card.is-muted { opacity: .62; }
 .video-stage { position: relative; height: 338px; overflow: hidden; border-radius: 17px; background: #102019; }
 .video-stage video { width: 100%; height: 100%; object-fit: contain; background: #08110d; }
+.source-video-embed { width: 100%; height: 100%; border: 0; background: #08110d; }
+.stage-loading { width: 100%; height: 100%; display: grid; place-items: center; align-content: center; gap: 12px; background: #0b1712; color: rgba(236,246,240,.8); font-size: .78rem; font-weight: 750; }
+.stage-loading .loader { border-color: rgba(199,244,92,.25); border-top-color: var(--acid); }
 .stage-placeholder { position: absolute; inset: 0; width: 100%; border: 0; overflow: hidden; background: linear-gradient(to top, rgba(8,20,15,.92), transparent 50%), radial-gradient(circle at 67% 36%, rgba(186,236,117,.18), transparent 17%), linear-gradient(145deg, #142e28 0%, #24493e 48%, #0c1915 100%); cursor: pointer; }
 .stage-placeholder::before, .stage-placeholder::after { content: ''; position: absolute; bottom: 0; background: rgba(7,18,14,.82); }
 .stage-placeholder::before { left: 8%; width: 14%; height: 42%; clip-path: polygon(15% 16%, 100% 0, 88% 100%, 0 100%); }
@@ -205,6 +208,8 @@ h1 em { color: #397c5d; font-style: normal; }
 .filmstrip:disabled { cursor: not-allowed; opacity: .7; }
 .filmstrip:focus-visible { outline: 3px solid rgba(110,178,98,.45); outline-offset: 3px; }
 .filmstrip > span { background: radial-gradient(circle at 70% 35%, hsla(var(--hue),60%,70%,.34), transparent 23%), linear-gradient(145deg, hsl(var(--hue),22%,var(--light)), #0e1815); }
+.filmstrip > span.timeline-frame { background-color: #14221c; background-position: center; background-size: cover; background-repeat: no-repeat; }
+.filmstrip > span.timeline-frame.is-loading { background: #17251e; }
 .filmstrip > span.selection-box { position: absolute; top: 0; bottom: 0; z-index: 2; border: 2px solid var(--acid); background: rgba(199,244,92,.10); box-shadow: inset 0 0 0 1px rgba(11,28,21,.5); pointer-events: none; }
 .selection-box::before, .selection-box::after { content: ''; position: absolute; top: 50%; width: 7px; height: 25px; border-radius: 4px; background: var(--acid); transform: translateY(-50%); }
 .selection-box::before { left: -5px; }

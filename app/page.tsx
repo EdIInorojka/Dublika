@@ -16,7 +16,6 @@ import {
   Link2,
   LockKeyhole,
   Mic,
-  MoreHorizontal,
   Music2,
   Pause,
   Play,
@@ -33,7 +32,7 @@ import {
   X,
 } from 'lucide-react';
 
-import { AppSidebar, ProductPages, type Navigate } from '@/components/product-pages';
+import { ProductPages, type Navigate } from '@/components/product-pages';
 import {
   Dialog,
   DialogContent,
@@ -43,7 +42,6 @@ import {
 } from '@/components/ui/dialog';
 import { Progress } from '@/components/ui/progress';
 import { Slider } from '@/components/ui/slider';
-import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { apiFetch, mediaUrl } from '@/lib/local-api';
 
@@ -100,8 +98,6 @@ type Clip = {
   end: number;
 };
 
-// Used only before the local media service has returned an actual waveform.
-const fallbackWaveform = [18, 28, 34, 22, 48, 62, 38, 74, 54, 82, 44, 68, 30, 58, 72, 42, 88, 64, 46, 76, 34, 56, 84, 52, 70, 38, 60, 78, 48, 66, 26, 52, 72, 40, 58, 80, 46, 68, 36, 54, 74, 44, 62, 28, 50, 70, 38, 56];
 const demoVideo = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4';
 const recordingLeadSeconds = 1;
 const recordingTailSeconds = 1;
@@ -113,6 +109,19 @@ function formatTime(value: number) {
   const seconds = Math.floor(value % 60);
   const tenth = Math.floor((value % 1) * 10);
   return `${minutes}:${String(seconds).padStart(2, '0')}.${tenth}`;
+}
+
+function youtubeEmbedUrl(value: string) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^www\./, '').toLowerCase();
+    const id = host === 'youtu.be'
+      ? url.pathname.split('/').filter(Boolean)[0]
+      : url.searchParams.get('v') || (host.endsWith('youtube.com') ? url.pathname.match(/^\/(?:shorts|embed)\/([^/?]+)/)?.[1] : null);
+    return id && /^[\w-]{6,}$/.test(id) ? `https://www.youtube-nocookie.com/embed/${id}?rel=0&modestbranding=1` : '';
+  } catch {
+    return '';
+  }
 }
 
 export default function Home() {
@@ -147,9 +156,9 @@ export default function Home() {
   const [sourceName, setSourceName] = useState('Новый ролик');
   const [sourceUrl, setSourceUrl] = useState('');
   const [videoUrl, setVideoUrl] = useState('');
-  const [duration, setDuration] = useState(192);
-  const [trim, setTrim] = useState<number[]>([36, 69]);
-  const [clips, setClips] = useState<Clip[]>([{ id: 'clip-1', start: 36, end: 69 }]);
+  const [duration, setDuration] = useState(0);
+  const [trim, setTrim] = useState<number[]>([0, 0]);
+  const [clips, setClips] = useState<Clip[]>([]);
   const [activeClipId, setActiveClipId] = useState('clip-1');
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzed, setAnalyzed] = useState(false);
@@ -179,6 +188,7 @@ export default function Home() {
   const [transcriptionMode, setTranscriptionMode] = useState<'transcribed' | 'manual' | null>(null);
   const [originalLevels, setOriginalLevels] = useState<number[]>(Array.from({ length: 96 }, () => 0));
   const [editorLevels, setEditorLevels] = useState<number[]>([]);
+  const [timelineThumbnails, setTimelineThumbnails] = useState<string[]>([]);
   const [editorPlayhead, setEditorPlayhead] = useState(0);
   const [timelineDragging, setTimelineDragging] = useState(false);
   const [wizardStep, setWizardStep] = useState<1 | 2 | 3 | 4>(1);
@@ -189,7 +199,7 @@ export default function Home() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  const clipLength = Math.max(1, clips.reduce((total, clip) => total + Math.max(0, clip.end - clip.start), 0));
+  const clipLength = clips.reduce((total, clip) => total + Math.max(0, clip.end - clip.start), 0);
   const finishedSegments = segments.filter((item) => item.state !== 'pending').length;
   const pendingSegments = segments.filter((item) => item.state === 'pending').length;
   const allSegmentsFinished = analyzed && segments.length > 0 && pendingSegments === 0 && takeUploads === 0;
@@ -205,11 +215,7 @@ export default function Home() {
     return email ? email.split('@')[0] : 'Профиль';
   })();
 
-  const timelineBlocks = useMemo(
-    () => Array.from({ length: 12 }, (_, index) => ({ id: index, hue: 194 + (index % 4) * 8, lightness: 21 + (index % 3) * 5 })),
-    [],
-  );
-  const editorWaveform = projectId && editorLevels.length === 96 ? editorLevels.map((level) => Math.max(10, level * 100)) : fallbackWaveform;
+  const editorWaveform = projectId && editorLevels.length === 96 ? editorLevels.map((level) => Math.max(0, Math.min(100, level * 100))) : [];
 
   function paintEditorPlayhead(time: number) {
     const nextTime = Math.max(0, Math.min(duration, Number.isFinite(time) ? time : 0));
@@ -314,6 +320,7 @@ export default function Home() {
       status: string;
       trim?: { start: number; end: number } | null;
       clips?: Clip[];
+      duration?: number;
       segments: Segment[];
       transcriptionMode?: 'transcribed' | 'manual';
     };
@@ -329,6 +336,7 @@ export default function Home() {
         setSourceName(project.title);
         setVideoUrl(mediaUrl(project.inputUrl));
         setSourceReady(true);
+        setDuration(Number(project.duration) || 0);
         setClips(savedClips);
         setActiveClipId(firstClip.id);
         setTrim([firstClip.start, firstClip.end]);
@@ -341,6 +349,7 @@ export default function Home() {
         setResultUrl(project.outputUrl ? mediaUrl(project.outputUrl) : '');
         setCredits(nextCredits);
         setEditorLevels([]);
+        setTimelineThumbnails([]);
         setBackendOnline(true);
         setMessage(`Открыт проект «${project.title}». Можно продолжить с любой реплики.`);
       })
@@ -361,6 +370,22 @@ export default function Home() {
       .catch(() => { if (!cancelled) setOriginalLevels(Array.from({ length: 96 }, () => 0)); });
     return () => { cancelled = true; };
   }, [activeSegment, analyzed, projectId]);
+
+  useEffect(() => {
+    if (!projectId) {
+      setTimelineThumbnails([]);
+      return;
+    }
+    let cancelled = false;
+    void apiFetch<{ duration: number; thumbnails: string[] }>(`/projects/${projectId}/thumbnails?count=12`)
+      .then((result) => {
+        if (cancelled) return;
+        if (result.duration > 0) setDuration(result.duration);
+        setTimelineThumbnails(result.thumbnails.map((path) => mediaUrl(path)));
+      })
+      .catch(() => { if (!cancelled) setTimelineThumbnails([]); });
+    return () => { cancelled = true; };
+  }, [projectId]);
 
   useEffect(() => {
     if (!projectId || !sourceReady || timelineDragging) return;
@@ -407,10 +432,12 @@ export default function Home() {
   async function createRemoteProject(url: string, title: string) {
     setUploading(true);
     try {
-      const result = await apiFetch<{ project: { id: string; inputUrl: string }; credits: number }>('/projects/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, title }) });
+      const result = await apiFetch<{ project: { id: string; inputUrl: string; duration: number }; credits: number }>('/projects/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, title }) });
       setProjectId(result.project.id);
       setEditorLevels([]);
+      setTimelineThumbnails([]);
       setVideoUrl(mediaUrl(result.project.inputUrl));
+      resetSelectionForDuration(result.project.duration);
       setCredits(result.credits);
       window.localStorage.setItem('dublika-credits', String(result.credits));
       setBackendOnline(true);
@@ -477,10 +504,12 @@ export default function Home() {
   async function uploadSource(file: File) {
     setUploading(true);
     try {
-      const result = await apiFetch<{ project: { id: string; inputUrl: string }; credits: number }>('/projects/upload', { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) }, body: file });
+      const result = await apiFetch<{ project: { id: string; inputUrl: string; duration: number }; credits: number }>('/projects/upload', { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) }, body: file });
       setProjectId(result.project.id);
       setEditorLevels([]);
+      setTimelineThumbnails([]);
       setVideoUrl(mediaUrl(result.project.inputUrl));
+      resetSelectionForDuration(result.project.duration);
       setCredits(result.credits);
       window.localStorage.setItem('dublika-credits', String(result.credits));
       setBackendOnline(true);
@@ -534,13 +563,26 @@ export default function Home() {
     const nextDuration = videoRef.current?.duration;
     if (!nextDuration || !Number.isFinite(nextDuration)) return;
     setDuration(nextDuration);
-    if (openedProjectRef.current !== projectId) setSingleClip(0, Math.min(nextDuration, 60));
+    const hasValidSelection = clips.length > 0 && clips.every((clip) => clip.start >= 0 && clip.end <= nextDuration + .05 && clip.end - clip.start >= 2);
+    if (!hasValidSelection) resetSelectionForDuration(nextDuration);
     syncEditorPlayhead(0, true);
   }
 
+  function resetSelectionForDuration(sourceDuration: number) {
+    const nextDuration = Math.max(0, Number(sourceDuration) || 0);
+    setDuration(nextDuration);
+    if (nextDuration < 2) {
+      setClips([]);
+      setTrim([0, 0]);
+      return;
+    }
+    setSingleClip(0, Math.min(nextDuration, 60));
+  }
+
   function setSingleClip(start: number, end: number) {
-    const nextStart = Math.max(0, Math.min(start, Math.max(0, end - 2)));
-    const nextEnd = Math.max(nextStart + Math.min(2, Math.max(0, end - nextStart)), end);
+    const requestedEnd = Math.max(0, Number(end) || 0);
+    const nextStart = Math.max(0, Math.min(Number(start) || 0, Math.max(0, requestedEnd - 2)));
+    const nextEnd = Math.max(nextStart + 2, requestedEnd);
     const clip: Clip = { id: 'clip-1', start: Math.round(nextStart * 10) / 10, end: Math.round(nextEnd * 10) / 10 };
     setClips([clip]);
     setActiveClipId(clip.id);
@@ -735,10 +777,13 @@ export default function Home() {
     context.clearRect(0, 0, width, height);
 
     const barCount = 96;
-    const visualEnvelope = (values: number[]) => {
-      const peak = Math.max(.02, ...values);
-      return values.map((value) => Math.min(.92, Math.pow(Math.max(0, value) / peak, .74) * .9));
-    };
+    const current = segments.find((item) => item.id === activeSegment);
+    const levels = analyser ? latestLevelsRef.current : current?.waveform || latestLevelsRef.current;
+    // Both layers deliberately use one reference. A quiet original and a loud
+    // mic now look quiet/loud relative to one another instead of every track
+    // being independently inflated to the full canvas height.
+    const sharedPeak = Math.max(.035, ...originalLevels, ...levels);
+    const visualEnvelope = (values: number[]) => values.map((value) => Math.min(.92, Math.pow(Math.max(0, value) / sharedPeak, .74) * .9));
     const gap = width / barCount;
     context.strokeStyle = 'rgba(239, 86, 86, .36)';
     context.lineWidth = 2;
@@ -756,7 +801,7 @@ export default function Home() {
       analyser.getByteTimeDomainData(samples);
       let energy = 0;
       for (const sample of samples) energy += Math.abs(sample - 128) / 128;
-      const level = Math.min(1, (energy / samples.length) * 4.8);
+      const level = Math.min(1, energy / samples.length);
       // A take is written from its beginning to its end.  Shifting samples
       // left made the recording look like a news ticker and hid timing.
       const session = recordingSessionRef.current;
@@ -768,8 +813,6 @@ export default function Home() {
       recordingWaveCursorRef.current = Math.max(recordingWaveCursorRef.current, target);
     }
 
-    const current = segments.find((item) => item.id === activeSegment);
-    const levels = analyser ? latestLevelsRef.current : current?.waveform || latestLevelsRef.current;
     const voiceEnvelope = visualEnvelope(levels);
     context.strokeStyle = current?.audioUrl || analyser ? '#75e66d' : 'rgba(117, 230, 109, .22)';
     context.lineWidth = 3;
@@ -1220,6 +1263,7 @@ export default function Home() {
   const recordProgress = Math.min(100, recordElapsed / activeRecordingWindow.duration * 100);
   const originalIsPlaying = playback?.kind === 'original' && playback.segmentId === activeSegment;
   const takeIsPlaying = playback?.kind === 'take' && playback.segmentId === activeSegment;
+  const importEmbedUrl = uploading && !videoUrl ? youtubeEmbedUrl(sourceUrl) : '';
   const pageProps = {
     route,
     navigate,
@@ -1240,12 +1284,9 @@ export default function Home() {
   }
 
   return (
-    <SidebarProvider defaultOpen>
-      {!showRecordingView && <AppSidebar route="/studio" navigate={navigate} />}
-      <SidebarInset className="studio-inset">
     <div className={`app-shell studio-app-shell studio-wizard ${showRecordingView ? 'is-recording-stage' : ''} ${showResultView ? 'is-result-stage' : ''}`}>
       <header className="topbar">
-        <div className="studio-brand-group">{!showRecordingView && <SidebarTrigger />}<button className="brand" type="button" onClick={() => navigate('/')} aria-label="Дублика — на главную">
+        <div className="studio-brand-group"><button className="brand" type="button" onClick={() => navigate('/')} aria-label="Дублика — на главную">
           <span className="brand-mark"><span>Д</span></span><span className="brand-word">дублика</span>
         </button></div>
         <nav className="main-nav" aria-label="Основная навигация">
@@ -1326,13 +1367,10 @@ export default function Home() {
                 <span className="duration-chip"><Clock3 size={14} /> {formatTime(clipLength)}</span>
               </div>
               <div className="video-stage">
-                {videoUrl ? <video ref={videoRef} src={videoUrl} controls onLoadedMetadata={handleMetadata} onTimeUpdate={() => syncEditorPlayhead(videoRef.current?.currentTime || 0)} onSeeking={() => syncEditorPlayhead(videoRef.current?.currentTime || 0, true)} onPlay={() => { setIsPlaying(true); startEditorPlayheadAnimation(); }} onPause={() => { stopEditorPlayheadAnimation(); syncEditorPlayhead(videoRef.current?.currentTime || 0, true); setIsPlaying(false); }} /> : (
-                  <button type="button" className="stage-placeholder" onClick={() => setIsPlaying(!isPlaying)}>
-                    <span className="scene-light one" /><span className="scene-light two" /><span className="city-line" />
-                    <span className="stage-play">{isPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}</span><span className="stage-caption">{sourceReady ? 'Предпросмотр' : 'Загрузите видео, чтобы открыть предпросмотр'}</span>
-                  </button>
-                )}
-                <div className="stage-topline"><span><FileVideo size={14} /> {sourceReady ? sourceName : 'Видео не выбрано'}</span><button aria-label="Действия с видео"><MoreHorizontal size={18} /></button></div>
+                {videoUrl ? <video ref={videoRef} src={videoUrl} controls onLoadedMetadata={handleMetadata} onTimeUpdate={() => syncEditorPlayhead(videoRef.current?.currentTime || 0)} onSeeking={() => syncEditorPlayhead(videoRef.current?.currentTime || 0, true)} onPlay={() => { setIsPlaying(true); startEditorPlayheadAnimation(); }} onPause={() => { stopEditorPlayheadAnimation(); syncEditorPlayhead(videoRef.current?.currentTime || 0, true); setIsPlaying(false); }} /> : importEmbedUrl ? (
+                  <iframe className="source-video-embed" src={importEmbedUrl} title="Видео для дубляжа" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen />
+                ) : <div className="stage-loading"><span className="loader" /><span>{uploading ? 'Подготавливаем видео…' : 'Выберите видео'}</span></div>}
+                <div className="stage-topline"><span><FileVideo size={14} /> {sourceReady ? sourceName : 'Видео не выбрано'}</span></div>
               </div>
               <div className="timeline">
                 <div className="timeline-toolbar"><span>{formatTime(trim[0])}</span><div><Scissors size={15} /> Фрагмент {Math.max(1, clips.findIndex((clip) => clip.id === activeClipId) + 1)} из {clips.length}</div><span>{formatTime(trim[1])}</span></div>
@@ -1341,7 +1379,7 @@ export default function Home() {
                   event.preventDefault();
                   seekEditor(editorPlayhead + (event.key === 'ArrowRight' ? 1 : -1));
                 }} aria-label={`Текущая позиция ${formatTime(editorPlayhead)}. Тяните светлые границы активного фрагмента или нажмите по ленте, чтобы перейти к моменту видео.`}>
-                  {timelineBlocks.map((block) => <span key={block.id} style={{ '--hue': block.hue, '--light': `${block.lightness}%` } as React.CSSProperties} />)}
+                  {timelineThumbnails.length ? timelineThumbnails.map((thumbnail, index) => <span className="timeline-frame" key={thumbnail} style={{ backgroundImage: `url("${thumbnail}")` }} aria-hidden="true" />) : Array.from({ length: 12 }, (_, index) => <span className="timeline-frame is-loading" key={index} aria-hidden="true" />)}
                   {clips.map((clip) => {
                     const start = Math.min(100, Math.max(0, clip.start / Math.max(duration, 1) * 100));
                     const end = Math.min(100, Math.max(start, clip.end / Math.max(duration, 1) * 100));
@@ -1349,7 +1387,7 @@ export default function Home() {
                   })}
                   <span className="timeline-playhead" aria-hidden="true" />
                 </button>
-                <div className="waveform" aria-label={editorLevels.length === 96 ? 'Форма волны выбранного отрывка' : 'Форма волны будет построена после загрузки видео'}>{editorWaveform.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
+                <div className="waveform" aria-label="Форма волны выбранного отрывка">{editorWaveform.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
                 <Slider className="trim-slider" value={trim} min={0} max={Math.max(duration, 1)} step={0.1} onValueChange={(next) => handleTrim(next, false)} onValueCommitted={() => invalidatePreparedCues()} disabled={!sourceReady} aria-label="Границы отрывка" />
                 <div className="timeline-scale"><span>0:00</span><span>{formatTime(duration / 2)}</span><span>{formatTime(duration)}</span></div>
                 <div className="timeline-inputs">
@@ -1459,7 +1497,5 @@ export default function Home() {
         </DialogContent>
       </Dialog>
     </div>
-      </SidebarInset>
-    </SidebarProvider>
   );
 }
