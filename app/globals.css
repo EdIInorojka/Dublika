@@ -704,6 +704,7 @@ h1 em { color: #397c5d; font-style: normal; }
 .studio-wizard.is-recording-stage .wizard-stepper { flex: 0 0 auto; margin: 0 0 10px; }
 .studio-wizard.is-recording-stage .workspace-grid,
 .studio-wizard.is-recording-stage .workspace-main { flex: 1; min-height: 0; display: block; }
+.studio-wizard.is-recording-stage .workspace-main { height: 100%; }
 .studio-wizard.is-recording-stage .dub-console-card { height: 100%; display: flex; flex-direction: column; overflow: hidden; padding: 0; border-color: #24372d; border-radius: 20px; }
 .studio-wizard.is-recording-stage .dub-console-header { flex: 0 0 auto; min-height: 64px; margin: 0; padding: 12px 16px; border-bottom: 1px solid #25372d; }
 .studio-wizard.is-recording-stage .dub-console-header p { margin-top: 1px; }
@@ -801,6 +802,16 @@ h1 em { color: #397c5d; font-style: normal; }
 .studio-wizard.is-recording-stage .segment-queue .line-item.is-current { border-color: var(--acid); background: rgba(199, 244, 92, .11); box-shadow: none; }
 .studio-wizard.is-recording-stage .segment-queue .line-play { border: 1px solid rgba(166, 202, 176, .24); }
 
+/* `.segment-queue` also has the generic `.line-list` class.  Make the
+   direction explicit here: on narrow screens the generic vertical list used
+   to win the cascade and put the cue buttons below the visible workstation. */
+.studio-wizard.is-recording-stage .segment-queue {
+  flex-direction: row;
+  align-items: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 .sidebar-user div { justify-content: center; }
 .sidebar-user small { display: none; }
 
@@ -813,9 +824,34 @@ h1 em { color: #397c5d; font-style: normal; }
   .studio-wizard .editor-footer .primary-button { min-width: 0; }
 
   .studio-wizard.is-recording-stage .segment-queue { order: 1; }
+  .studio-wizard.is-recording-stage .segment-queue { flex-direction: row; align-items: center; overflow-x: auto; overflow-y: hidden; }
   .studio-wizard.is-recording-stage .segment-queue-head { border-right: 0; }
   .studio-wizard.is-recording-stage .record-controls > button small { display: none; }
   .studio-wizard.is-recording-stage .record-controls > button { grid-template-columns: 26px minmax(0, 1fr); }
   .recording-transcript { max-height: 31px; margin-top: 3px; font-size: .55rem; }
   .recording-transcript span { font-size: .43rem; }
+}
+
+/* Recording is a focused tool, not a long document. On laptop-height screens
+   remove the site chrome and reserve a fixed compact slot for every control. */
+.studio-wizard.is-recording-stage .topbar { display: none; }
+.studio-wizard.is-recording-stage .main-area { height: 100dvh; }
+
+@media (max-height: 800px) and (min-width: 721px) {
+  .studio-wizard.is-recording-stage .main-area { padding-block: 9px; }
+  .studio-wizard.is-recording-stage .wizard-stepper { margin-bottom: 7px; }
+  .studio-wizard.is-recording-stage .dub-console-header { min-height: 52px; padding-block: 8px; }
+  .studio-wizard.is-recording-stage .dub-console-header p { display: none; }
+  .studio-wizard.is-recording-stage .segment-queue { flex-basis: 70px; min-height: 70px; padding-block: 6px; }
+  .studio-wizard.is-recording-stage .segment-queue .line-item { flex-basis: 40px; min-height: 47px; }
+  .studio-wizard.is-recording-stage .segment-queue .line-play { width: 24px; height: 24px; }
+  .studio-wizard.is-recording-stage .dub-workbench { grid-template-rows: minmax(150px, 1fr) auto auto auto auto; padding: 8px 14px 9px; }
+  .studio-wizard.is-recording-stage .segment-video-wrap { min-height: 150px; }
+  .studio-wizard.is-recording-stage .active-caption { padding-block: 6px; }
+  .studio-wizard.is-recording-stage .active-caption textarea { min-height: 38px; max-height: 48px; font-size: .8rem; }
+  .studio-wizard.is-recording-stage .wave-compare-head { padding-block: 4px; }
+  .studio-wizard.is-recording-stage .live-wave-shell { height: 72px; }
+  .studio-wizard.is-recording-stage .record-limit { margin-top: 5px; padding-block: 5px; }
+  .studio-wizard.is-recording-stage .record-controls { margin-top: 5px; }
+  .studio-wizard.is-recording-stage .record-controls > button { min-height: 54px; }
 }

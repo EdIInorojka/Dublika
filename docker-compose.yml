@@ -1,0 +1,17 @@
+services:
+  dublika-api:
+    build: .
+    restart: unless-stopped
+    # Defaults to .env in production. The override makes it possible to
+    # validate this compose file safely with .env.example in CI.
+    env_file: ${DUBLIKA_ENV_FILE:-.env}
+    # Docker forwards traffic to the container network namespace, therefore
+    # loopback inside the container would make the published port unreachable.
+    environment:
+      DUBLIKA_HOST: 0.0.0.0
+    volumes:
+      - ./data:/app/.local-data
+    # Put this behind Caddy/Nginx/Cloudflare Tunnel. Do not expose the Node
+    # port directly to the public Internet.
+    ports:
+      - "127.0.0.1:8788:8788"

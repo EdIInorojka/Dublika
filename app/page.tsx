@@ -101,7 +101,6 @@ type Clip = {
   end: number;
 };
 
-const demoVideo = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4';
 const recordingLeadSeconds = 1;
 const recordingTailSeconds = 1;
 const maxSelectedSeconds = 240;
@@ -176,7 +175,8 @@ export default function Home() {
   const [assemblyProgress, setAssemblyProgress] = useState(0);
   const [pricingOpen, setPricingOpen] = useState(false);
   const [signedIn, setSignedIn] = useState(() => typeof window !== 'undefined' && window.localStorage.getItem('dublika-auth') === '1');
-  const [plan] = useState('Пробный');
+  const [plan, setPlan] = useState('Пробный');
+  const [paymentStarting, setPaymentStarting] = useState(false);
   const [countdownEnabled] = useState(true);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [recordElapsed, setRecordElapsed] = useState(0);
@@ -188,7 +188,8 @@ export default function Home() {
   const [, setBackendOnline] = useState(false);
   const [resultUrl, setResultUrl] = useState('');
   const [credits, setCredits] = useState(() => Number(typeof window !== 'undefined' ? window.localStorage.getItem('dublika-credits') || 3 : 3));
-  const [transcriptionMode, setTranscriptionMode] = useState<'transcribed' | 'manual' | null>(null);
+  const [transcriptionMode, setTranscriptionMode] = useState<'transcribed' | 'manual' | 'demo' | null>(null);
+  const [textRevision, setTextRevision] = useState(0);
   const [originalLevels, setOriginalLevels] = useState<number[]>(Array.from({ length: 96 }, () => 0));
   const [editorLevels, setEditorLevels] = useState<number[]>([]);
   const [timelineThumbnails, setTimelineThumbnails] = useState<string[]>([]);
@@ -201,6 +202,12 @@ export default function Home() {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
+
+  useEffect(() => {
+    if (!message) return;
+    const timer = window.setTimeout(() => setMessage(''), 5200);
+    return () => window.clearTimeout(timer);
+  }, [message]);
 
   const clipLength = clips.reduce((total, clip) => total + Math.max(0, clip.end - clip.start), 0);
   const isSegmentSaved = (item: Segment) => item.state === 'ready' && Boolean(item.audioUrl);
@@ -311,6 +318,17 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const paymentReturn = new URLSearchParams(route.split('?')[1] || '').get('payment') === 'return';
+    if (!paymentReturn || !window.localStorage.getItem('dublika-token')) return;
+    void apiFetch<{ credits: number; plan: string }>('/billing/status').then((result) => {
+      setCredits(result.credits);
+      setPlan(result.plan || 'Пробный');
+      window.localStorage.setItem('dublika-credits', String(result.credits));
+      setMessage('Проверяем оплату. Доступ обновится автоматически после подтверждения ЮKassa.');
+    }).catch(() => undefined);
+  }, [route]);
+
+  useEffect(() => {
     const query = route.includes('?') ? route.slice(route.indexOf('?') + 1).split('#')[0] : '';
     const queryParams = new URLSearchParams(query);
     const requestedId = queryParams.get('project');
@@ -335,7 +353,7 @@ export default function Home() {
       clips?: Clip[];
       duration?: number;
       segments: Segment[];
-      transcriptionMode?: 'transcribed' | 'manual';
+      transcriptionMode?: 'transcribed' | 'manual' | 'demo';
     };
     void apiFetch<{ project: StoredProject; credits: number }>(`/projects/${requestedId}`)
       .then(({ project, credits: nextCredits }) => {
@@ -354,6 +372,7 @@ export default function Home() {
         setActiveClipId(firstClip.id);
         setTrim([firstClip.start, firstClip.end]);
         setSegments(project.segments.map((segment) => segment.audioUrl ? { ...segment, audioUrl: mediaUrl(segment.audioUrl) } : segment));
+        setTextRevision(0);
         setActiveSegment(project.segments[0]?.id || 1);
         setTranscriptionMode(project.transcriptionMode || (project.segments.some((segment) => segment.text) ? 'transcribed' : null));
         setAnalyzed(project.segments.length > 0);
@@ -476,41 +495,43 @@ export default function Home() {
 
   async function loadDemo() {
     setSourceTab('demo');
-    setSourceReady(true);
-    setWizardStep(2);
-    setSourceName('Цветы крупным планом.mp4');
-    setVideoUrl(demoVideo);
-    setDuration(5.05);
-    setSingleClip(0, 5.05);
+    setSourceReady(false);
+    setUploading(true);
     setAnalyzed(false);
     setSegments([]);
+    setTextRevision(0);
     setTranscriptionMode(null);
     setMessage('Открываем сцену…');
-    const id = await createRemoteProject(demoVideo, 'Цветы крупным планом.mp4');
-    if (id) {
-      try {
-        const result = await apiFetch<{ segments: Segment[]; transcriptionMode: 'transcribed' | 'manual'; transcriptionReason?: 'no_speech' | 'unavailable' | null }>(`/projects/${id}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start: 0, end: 5.05 }) });
-        setSegments(result.segments);
-        setTranscriptionMode(result.transcriptionMode);
-        setAnalyzed(true);
-        setActiveSegment(1);
-        setWizardStep(3);
-        navigate(`/studio?project=${id}&view=text`);
-        setMessage(result.transcriptionMode === 'transcribed' ? 'Сцена готова. Проверьте текст перед записью.' : 'Сцена готова. Добавьте текст для реплик перед записью.');
-        return;
-      } catch {
-        setSourceReady(false);
-        setVideoUrl('');
-        setWizardStep(1);
-        setMessage('Не удалось открыть сцену. Попробуйте ещё раз.');
-      }
+    try {
+      const created = await apiFetch<{ project: { id: string; title: string; inputUrl: string; duration: number }; credits: number }>('/projects/demo', { method: 'POST' });
+      const { project } = created;
+      setProjectId(project.id);
+      setSourceName(project.title);
+      setVideoUrl(mediaUrl(project.inputUrl));
+      setSourceReady(true);
+      resetSelectionForDuration(project.duration);
+      setCredits(created.credits);
+      const result = await apiFetch<{ segments: Segment[]; transcriptionMode: 'transcribed' | 'manual' | 'demo' }>(`/projects/${project.id}/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ start: 0, end: project.duration }),
+      });
+      setSegments(result.segments);
+      setTextRevision(0);
+      setTranscriptionMode(result.transcriptionMode);
+      setAnalyzed(true);
+      setActiveSegment(result.segments[0]?.id || 1);
+      setWizardStep(3);
+      navigate(`/studio?project=${project.id}&view=text`);
+      setMessage('Демо-сцена готова. Это пример с заранее написанными репликами.');
+    } catch (cause) {
+      setSourceReady(false);
+      setVideoUrl('');
+      setWizardStep(1);
+      setMessage(cause instanceof Error ? cause.message : 'Не удалось открыть демо-сцену.');
+    } finally {
+      setUploading(false);
     }
-    setSegments([]);
-    setAnalyzed(false);
-    setSourceReady(false);
-    setVideoUrl('');
-    setWizardStep(1);
-    setMessage('Не удалось открыть сцену. Попробуйте ещё раз.');
   }
 
   useEffect(() => {
@@ -547,16 +568,18 @@ export default function Home() {
       window.localStorage.setItem('dublika-credits', String(result.credits));
       setBackendOnline(true);
       setMessage('Видео готово. Выберите нужные фрагменты.');
-    } catch {
+    } catch (cause) {
       setBackendOnline(false);
-      setMessage('Не удалось загрузить видео. Попробуйте ещё раз.');
+      setMessage(cause instanceof Error ? cause.message : 'Не удалось загрузить видео. Попробуйте ещё раз.');
     } finally { setUploading(false); }
   }
 
   function onFile(file?: File) {
     if (!file) return;
-    if (!file.type.startsWith('video/')) {
-      setMessage('Нужен видеофайл: MP4, MOV или WebM.');
+    const supportedName = /\.(mp4|mov|webm|mkv|m4v)$/i.test(file.name);
+    // iOS Safari often leaves File.type empty for a perfectly valid MOV/MP4.
+    if (!file.type.startsWith('video/') && !supportedName) {
+      setMessage('Нужен видеофайл: MP4, MOV, WebM, MKV или M4V.');
       return;
     }
     const url = URL.createObjectURL(file);
@@ -566,6 +589,7 @@ export default function Home() {
     setWizardStep(2);
     setAnalyzed(false);
     setSegments([]);
+    setTextRevision(0);
     setTranscriptionMode(null);
     setAssembly('idle');
     setResultUrl('');
@@ -586,6 +610,7 @@ export default function Home() {
     setWizardStep(2);
     setAnalyzed(false);
     setSegments([]);
+    setTextRevision(0);
     setTranscriptionMode(null);
     setMessage('Загружаем видео по ссылке…');
     const id = await createRemoteProject(value, value.includes('youtu') ? 'Видео с YouTube' : value.includes('vk') ? 'Видео из VK' : 'Видео по ссылке');
@@ -772,19 +797,20 @@ export default function Home() {
     setMessage('Готовим реплики…');
     if (projectId) {
       try {
-        const result = await apiFetch<{ segments: Segment[]; transcriptionMode: 'transcribed' | 'manual'; transcriptionReason?: 'no_speech' | 'unavailable' | null }>(`/projects/${projectId}/analyze`, {
+        const result = await apiFetch<{ segments: Segment[]; transcriptionMode: 'transcribed' | 'manual' | 'demo'; transcriptionReason?: 'no_speech' | 'unavailable' | null }>(`/projects/${projectId}/analyze`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ clips: clips.map((clip) => ({ id: clip.id, start: clip.start, end: clip.end })) }),
         });
         setSegments(result.segments);
+        setTextRevision(0);
         setActiveSegment(result.segments[0]?.id || 1);
         setTranscriptionMode(result.transcriptionMode);
         setAnalyzing(false);
         setAnalyzed(true);
         setWizardStep(3);
         navigate(`/studio?project=${projectId}&view=text`);
-        setMessage(result.transcriptionMode === 'transcribed'
+        setMessage(result.transcriptionMode === 'transcribed' || result.transcriptionMode === 'demo'
           ? `Готово: ${result.segments.length} реплик. Проверьте текст перед записью.`
           : `Готово: ${result.segments.length} реплик. Добавьте текст перед записью.`);
         return;
@@ -1250,7 +1276,20 @@ export default function Home() {
 
   function updateText(id: number, text: string) {
     setSegments((items) => items.map((item) => item.id === id ? { ...item, text } : item));
+    setTextRevision((value) => value + 1);
   }
+
+  useEffect(() => {
+    if (!projectId || !analyzed || textRevision === 0) return;
+    const timer = window.setTimeout(() => {
+      void apiFetch<{ ok: boolean }>(`/projects/${projectId}/segments/text`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ segments: segments.map(({ id, text }) => ({ id, text })) }),
+      }).catch(() => setMessage('Текст пока не сохранился. Проверьте подключение перед записью.'));
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [analyzed, projectId, textRevision]);
 
   async function assembleVideo() {
     if (!analyzed) { setMessage('Сначала подготовьте реплики из выбранного отрывка.'); return; }
@@ -1304,9 +1343,22 @@ export default function Home() {
     setMessage('Итоговый MP4 ещё не собран. Запишите реплики и нажмите «Собрать видео».');
   }
 
-  function choosePlan(name: string) {
-    setPricingOpen(false);
-    setMessage(`Тариф «${name}» выбран.`);
+  async function choosePlan(planKey: 'start' | 'author') {
+    if (paymentStarting) return;
+    setPaymentStarting(true);
+    try {
+      const result = await apiFetch<{ confirmationUrl: string }>('/billing/create-payment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan: planKey }),
+      });
+      // The payment form lives on YooKassa. Credits are granted only after the
+      // provider webhook is verified by the API, never from this redirect.
+      window.location.assign(result.confirmationUrl);
+    } catch (cause) {
+      setMessage(cause instanceof Error ? cause.message : 'Не удалось открыть оплату.');
+      setPaymentStarting(false);
+    }
   }
 
   const path = route.split('?')[0].split('#')[0] || '/';
@@ -1403,7 +1455,7 @@ export default function Home() {
                   <button className="drop-zone" type="button" onClick={() => fileInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); onFile(event.dataTransfer.files[0]); }}>
                     <span className="upload-orb"><UploadCloud size={28} /></span><span><strong>Перетащите видео сюда</strong><small>или нажмите, чтобы выбрать файл</small></span><span className="format-pill">MP4 · MOV · WEBM</span>
                   </button>
-                  <input ref={fileInputRef} className="sr-only" type="file" accept="video/mp4,video/webm,video/quicktime" onChange={(event) => onFile(event.target.files?.[0])} />
+                  <input ref={fileInputRef} className="sr-only" type="file" accept="video/mp4,video/webm,video/quicktime,video/x-matroska,video/x-m4v,.mkv,.m4v" onChange={(event) => onFile(event.target.files?.[0])} />
                 </TabsContent>
                 <TabsContent value="link">
                   <div className="link-panel"><div className="link-input-wrap"><Link2 size={19} /><input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="Ссылка на YouTube, VK Видео или прямой MP4" /></div><button className="primary-button small" type="button" onClick={importLink}>Загрузить <ArrowRight size={17} /></button></div>
@@ -1481,7 +1533,7 @@ export default function Home() {
                   <div className="dub-workbench">
                     <div className="segment-video-wrap">
                       <video ref={segmentVideoRef} src={videoUrl} playsInline preload="auto" onPlay={handleSegmentVideoPlay} onPause={handleSegmentVideoPause} onSeeking={handleSegmentVideoSeeking} onTimeUpdate={handleSegmentVideoTimeUpdate} />
-                      <div className="segment-video-badge"><ListVideo /> {formatTime(activeLine.start)} — {formatTime(activeLine.end)} <i>+{formatTime(activeRecordingWindow.leadIn)} / +{formatTime(activeRecordingWindow.tailOut)}</i></div>
+                      <div className="segment-video-badge"><ListVideo /> {formatTime(activeLine.start)} — {formatTime(activeLine.end)}</div>
                       <button className="segment-preview-toggle" type="button" onClick={replayOriginal} disabled={recording !== null || countdown !== null}>{originalIsPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}<span>{originalIsPlaying ? 'Остановить' : 'Посмотреть фрагмент'}</span></button>
                       {countdown !== null && <div className="record-countdown"><span>{countdown}</span><small>приготовьтесь</small></div>}
                     </div>
@@ -1510,7 +1562,7 @@ export default function Home() {
                       <article className={`line-item ${activeSegment === item.id ? 'is-current' : ''} ${!isSegmentSaved(item) && firstPendingId !== item.id ? 'is-locked' : ''} ${item.state === 'saving' ? 'is-saving' : ''}`} key={item.id}>
                         <button className="line-select" type="button" onClick={() => selectSegment(item.id)} aria-label={`Открыть реплику ${item.id}`} />
                         <span className="line-play" aria-hidden="true"><em>{item.id}</em><Play size={15} fill="currentColor" /></span>
-                        <div className="line-copy"><span className="timecode">{formatTime(item.start)} — {formatTime(item.end)}</span><textarea rows={2} value={item.text} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()} onChange={(event) => updateText(item.id, event.target.value)} placeholder={transcriptionMode === 'transcribed' ? 'Проверьте текст' : 'Введите текст реплики'} aria-label={`Текст реплики ${item.id}`} /></div>
+                        <div className="line-copy"><span className="timecode">{formatTime(item.start)} — {formatTime(item.end)}</span><textarea rows={2} value={item.text} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()} onChange={(event) => updateText(item.id, event.target.value)} placeholder={transcriptionMode === 'manual' ? 'Введите текст реплики' : 'Проверьте текст'} aria-label={`Текст реплики ${item.id}`} /></div>
                         <span className={`queue-state ${isSegmentSaved(item) ? 'is-ready' : firstPendingId === item.id ? 'is-next' : 'is-locked'}`}>{isSegmentSaved(item) ? <Check size={14} /> : item.state === 'saving' ? <span className="loader" /> : firstPendingId === item.id ? <Mic size={13} /> : <LockKeyhole size={12} />}</span>
                       </article>
                     ))}
@@ -1546,8 +1598,8 @@ export default function Home() {
         <DialogContent className="product-dialog pricing-dialog">
           <DialogHeader><span className="dialog-overline">простые тарифы</span><DialogTitle>Платите только за готовые видео</DialogTitle><DialogDescription>Три бесплатные обработки для нового пользователя. Без скрытых списаний.</DialogDescription></DialogHeader>
           <div className="plans">
-            <button type="button" onClick={() => choosePlan('Старт')}><span className="plan-top"><strong>Старт</strong><em>популярный</em></span><span className="plan-price"><b>150 ₽</b><small>за пакет</small></span><span className="plan-features"><i><Check /> 5 видео до 4 минут</i><i><Check /> Full HD без водяного знака</i><i><Check /> Хранение 7 дней</i></span><span className="plan-cta">Выбрать пакет <ArrowRight /></span></button>
-            <button type="button" onClick={() => choosePlan('Автор')}><span className="plan-top"><strong>Автор</strong></span><span className="plan-price"><b>490 ₽</b><small>в месяц</small></span><span className="plan-features"><i><Check /> 25 видео каждый месяц</i><i><Check /> Приоритетная обработка</i><i><Check /> Хранение 30 дней</i></span><span className="plan-cta muted">Оформить подписку <ArrowRight /></span></button>
+            <button type="button" disabled={paymentStarting} onClick={() => void choosePlan('start')}><span className="plan-top"><strong>Старт</strong><em>популярный</em></span><span className="plan-price"><b>150 ₽</b><small>за пакет</small></span><span className="plan-features"><i><Check /> 5 видео до 4 минут</i><i><Check /> Full HD без водяного знака</i><i><Check /> Хранение 7 дней</i></span><span className="plan-cta">{paymentStarting ? 'Открываем оплату…' : <>Выбрать пакет <ArrowRight /></>}</span></button>
+            <button type="button" disabled={paymentStarting} onClick={() => void choosePlan('author')}><span className="plan-top"><strong>Автор</strong></span><span className="plan-price"><b>490 ₽</b><small>за 25 видео</small></span><span className="plan-features"><i><Check /> 25 видео до 4 минут</i><i><Check /> Приоритетная обработка</i><i><Check /> Хранение 30 дней</i></span><span className="plan-cta muted">{paymentStarting ? 'Открываем оплату…' : <>Выбрать пакет <ArrowRight /></>}</span></button>
           </div>
         </DialogContent>
       </Dialog>

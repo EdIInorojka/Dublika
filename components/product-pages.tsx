@@ -270,7 +270,37 @@ function AuthPage(props: PageProps) {
   const [error, setError] = useState('');
   const [devCode, setDevCode] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [oauthProviders, setOauthProviders] = useState<Array<{ id: string; label: string }>>([]);
+  const [oauthStarting, setOauthStarting] = useState<string | null>(null);
   const next = new URLSearchParams(props.route.split('?')[1] ?? '').get('next') || '/studio';
+
+  useEffect(() => {
+    void apiFetch<{ providers: Array<{ id: string; label: string }> }>('/auth/providers')
+      .then((result) => setOauthProviders(result.providers || []))
+      .catch(() => setOauthProviders([]));
+  }, []);
+
+  useEffect(() => {
+    const ticket = new URLSearchParams(props.route.split('?')[1] ?? '').get('oauth_ticket');
+    if (!ticket) return;
+    setSubmitting(true);
+    void apiFetch<{ token: string; user: { email: string; credits: number }; next?: string }>('/auth/oauth/consume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticket }),
+    }).then((result) => {
+      window.localStorage.setItem('dublika-token', result.token);
+      window.localStorage.setItem('dublika-credits', String(result.user.credits));
+      props.onSignedIn(result.user.email);
+      props.navigate(result.next || next);
+    }).catch((cause) => {
+      setError(cause instanceof Error ? cause.message : 'Не удалось завершить вход.');
+      setSubmitting(false);
+    });
+  // The ticket is one-time and disappears after navigation; reacting to the
+  // route alone avoids re-consuming it when parent callbacks are recreated.
+  // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.route]);
 
   async function sendCode() {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setError('Введите корректную почту'); return; }
@@ -302,8 +332,20 @@ function AuthPage(props: PageProps) {
     } finally { setSubmitting(false); }
   }
 
-  function telegramLogin() {
-    props.notify('Вход через Telegram появится после подключения официального бота. Пока используйте код из письма.');
+  async function startOauth(provider: string) {
+    setOauthStarting(provider);
+    setError('');
+    try {
+      const result = await apiFetch<{ authorizationUrl: string }>('/auth/oauth/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider, next }),
+      });
+      window.location.assign(result.authorizationUrl);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Не удалось открыть вход через провайдера.');
+      setOauthStarting(null);
+    }
   }
 
   return (
@@ -322,8 +364,7 @@ function AuthPage(props: PageProps) {
               <label className="email-field"><span>Электронная почта</span><div><Mail /><input value={email} onChange={(event) => setEmail(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && sendCode()} placeholder="name@example.ru" autoComplete="email" /></div></label>
               {error && <p className="auth-error">{error}</p>}
               <button className="auth-submit" type="button" disabled={submitting} onClick={() => void sendCode()}>{submitting ? 'Создаём код…' : 'Получить код'} <ArrowRight /></button>
-              <div className="auth-divider"><span>или</span></div>
-              <button className="telegram-button" type="button" onClick={telegramLogin}><MessageCircle fill="currentColor" /> Продолжить через Telegram</button>
+              {oauthProviders.length > 0 && <><div className="auth-divider"><span>или</span></div><div className="oauth-provider-list">{oauthProviders.map((provider) => <button className="telegram-button oauth-provider" type="button" key={provider.id} disabled={Boolean(oauthStarting) || submitting} onClick={() => void startOauth(provider.id)}><MessageCircle fill="currentColor" /> {oauthStarting === provider.id ? 'Открываем…' : `Продолжить через ${provider.label}`}</button>)}</div></>}
             </>
           ) : (
             <>

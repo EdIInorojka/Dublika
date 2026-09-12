@@ -21,9 +21,21 @@ const ytDlpPath = join(root, '.local-bin', 'yt-dlp.exe');
 const demucsPythonPath = process.env.DUBLIKA_DEMUCS_PYTHON || join(root, '.local-bin', 'demucs-venv', 'Scripts', 'python.exe');
 const demucsModel = process.env.DUBLIKA_DEMUCS_MODEL || 'htdemucs';
 const deepgramKeyPath = join(root, 'ключ.txt');
+const demoVideoPath = join(dataDir, 'dublika-demo-v2.mp4');
 const productionStatePath = join(dataDir, 'state.json');
 const sandboxStatePath = join(dataDir, 'test-state.json');
 const port = Number(process.env.LOCAL_APP_PORT || 8788);
+// Keep the safe loopback default for a desktop launch. A real deployment sits
+// behind an HTTPS reverse proxy and opts in explicitly with DUBLIKA_HOST=0.0.0.0.
+const bindHost = String(process.env.DUBLIKA_HOST || '127.0.0.1').trim();
+const publicOrigin = String(process.env.DUBLIKA_PUBLIC_ORIGIN || '').trim().replace(/\/$/, '');
+const qaEnabled = process.env.DUBLIKA_ENABLE_QA === '1';
+const maxConcurrentRenders = Math.max(1, Math.min(8, Number(process.env.DUBLIKA_MAX_CONCURRENT_RENDERS || 2) || 2));
+const demucsDevice = String(process.env.DUBLIKA_DEMUCS_DEVICE || 'cpu').trim() || 'cpu';
+const videoPreset = String(process.env.DUBLIKA_VIDEO_PRESET || 'veryfast').trim() || 'veryfast';
+const videoCrf = Math.max(17, Math.min(28, Number(process.env.DUBLIKA_VIDEO_CRF || 21) || 21));
+const yooKassaShopId = String(process.env.YOOKASSA_SHOP_ID || '').trim();
+const yooKassaSecret = String(process.env.YOOKASSA_SECRET_KEY || '').trim();
 const maxVideoBytes = 1024 * 1024 * 1024;
 const maxAudioBytes = 40 * 1024 * 1024;
 const maxSelectedSeconds = 240;
@@ -45,12 +57,13 @@ const allowedOrigins = new Set([
   // allow-list must survive a normal server restart.
   'https://site-five-woad-16.vercel.app',
   ...String(process.env.DUBLIKA_ALLOWED_ORIGINS || '').split(',').map((origin) => origin.trim()).filter(Boolean),
+  ...(publicOrigin ? [publicOrigin] : []),
 ]);
 
 for (const directory of [dataDir, uploadDir, recordingDir, outputDir, stemsDir, thumbnailDir]) mkdirSync(directory, { recursive: true });
 
 function initialState() {
-  return { secret: randomBytes(32).toString('hex'), users: {}, devices: {}, projects: {} };
+  return { secret: randomBytes(32).toString('hex'), users: {}, devices: {}, projects: {}, payments: {} };
 }
 
 function writeState(path, next) {
@@ -67,6 +80,9 @@ function loadState(path) {
 const productionStore = { realm: 'production', path: productionStatePath, data: loadState(productionStatePath) };
 const sandboxStore = { realm: 'test', path: sandboxStatePath, data: loadState(sandboxStatePath) };
 const stateContext = new AsyncLocalStorage();
+const requestBuckets = new Map();
+let activeRenderCount = 0;
+const renderWaiters = [];
 
 function activeStore() {
   return stateContext.getStore() || productionStore;
@@ -87,7 +103,40 @@ function saveState(next = activeStore().data) {
 function requestStore(request) {
   const environment = String(request.headers['x-dublika-environment'] || '').toLowerCase();
   const isSandboxMedia = String(request.url || '').includes('realm=test');
-  return environment === 'test' || isSandboxMedia ? sandboxStore : productionStore;
+  // The isolated QA realm is useful on the developer machine, but must never
+  // be exposed as an anonymous free-render endpoint on the public Internet.
+  return (environment === 'test' || isSandboxMedia) && qaEnabled && isLoopbackRequest(request) ? sandboxStore : productionStore;
+}
+
+function remoteAddress(request) {
+  return String(request.socket?.remoteAddress || '').replace(/^::ffff:/, '') || 'unknown';
+}
+
+function isLoopbackRequest(request) {
+  const address = remoteAddress(request);
+  return address === '127.0.0.1' || address === '::1' || address === 'localhost';
+}
+
+function rateLimit(request, scope, limit, windowMs) {
+  const now = Date.now();
+  const key = `${scope}:${remoteAddress(request)}`;
+  const bucket = (requestBuckets.get(key) || []).filter((time) => time > now - windowMs);
+  if (bucket.length >= limit) throw Object.assign(new Error('Слишком много попыток. Подождите немного и повторите.'), { statusCode: 429 });
+  bucket.push(now);
+  requestBuckets.set(key, bucket);
+}
+
+async function withRenderSlot(task) {
+  if (activeRenderCount >= maxConcurrentRenders) {
+    await new Promise((resolve) => renderWaiters.push(resolve));
+  }
+  activeRenderCount += 1;
+  try {
+    return await task();
+  } finally {
+    activeRenderCount = Math.max(0, activeRenderCount - 1);
+    renderWaiters.shift()?.();
+  }
 }
 
 function sendJson(response, status, payload) {
@@ -207,21 +256,33 @@ function tokenUser(request) {
   } catch { return null; }
 }
 
-function actor(request) {
+function actor(request, { allowLocalGuest = false } = {}) {
   const existing = tokenUser(request);
   if (existing) return existing;
+  // The UI always gates the studio behind sign-in.  Guests are kept only for
+  // local QA, so clearing browser storage or inventing a device id cannot
+  // create unlimited free production renders.
+  if (!allowLocalGuest || activeStore().realm !== 'test' || !isLoopbackRequest(request)) return null;
   const hash = deviceId(request);
   const knownUserId = state.devices[hash];
   if (knownUserId && state.users[knownUserId]) return state.users[knownUserId];
   const userId = `guest_${randomUUID()}`;
   const freeCredits = Object.prototype.hasOwnProperty.call(state.devices, hash) ? 0 : 3;
-  state.users[userId] = { id: userId, email: null, deviceHash: hash, credits: freeCredits, plan: 'Пробный', createdAt: new Date().toISOString() };
+  state.users[userId] = { id: userId, email: null, role: 'user', deviceHash: hash, credits: freeCredits, plan: 'Пробный', createdAt: new Date().toISOString() };
   state.devices[hash] = userId;
   saveState();
   return state.users[userId];
 }
 
+function requireActor(request, options) {
+  const user = actor(request, options);
+  if (!user) throw Object.assign(new Error('Войдите в аккаунт, чтобы продолжить.'), { statusCode: 401 });
+  return user;
+}
+
 const otpRequests = new Map();
+const oauthSessions = new Map();
+const oauthTickets = new Map();
 
 function isLoopbackOrigin(request) {
   const origin = String(request.headers.origin || '');
@@ -247,8 +308,147 @@ async function deliverOtpEmail(email, code) {
   return true;
 }
 
-async function handleAuth(request, response, pathname) {
+function oauthCallbackUrl(provider) {
+  const apiOrigin = String(process.env.DUBLIKA_API_ORIGIN || '').trim().replace(/\/$/, '');
+  if (!apiOrigin) return '';
+  return `${apiOrigin}/api/auth/oauth/${provider}/callback`;
+}
+
+function oauthProvider(provider) {
+  const common = {
+    google: { label: 'Google', clientId: process.env.OAUTH_GOOGLE_CLIENT_ID, clientSecret: process.env.OAUTH_GOOGLE_CLIENT_SECRET, authorize: 'https://accounts.google.com/o/oauth2/v2/auth', token: 'https://oauth2.googleapis.com/token', userInfo: 'https://openidconnect.googleapis.com/v1/userinfo', scope: 'openid email profile', scheme: 'Bearer' },
+    yandex: { label: 'Яндекс', clientId: process.env.OAUTH_YANDEX_CLIENT_ID, clientSecret: process.env.OAUTH_YANDEX_CLIENT_SECRET, authorize: 'https://oauth.yandex.ru/authorize', token: 'https://oauth.yandex.ru/token', userInfo: 'https://login.yandex.ru/info?format=json', scope: 'login:email login:info', scheme: 'OAuth' },
+    github: { label: 'GitHub', clientId: process.env.OAUTH_GITHUB_CLIENT_ID, clientSecret: process.env.OAUTH_GITHUB_CLIENT_SECRET, authorize: 'https://github.com/login/oauth/authorize', token: 'https://github.com/login/oauth/access_token', userInfo: 'https://api.github.com/user', scope: 'read:user user:email', scheme: 'Bearer' },
+    linkedin: { label: 'LinkedIn', clientId: process.env.OAUTH_LINKEDIN_CLIENT_ID, clientSecret: process.env.OAUTH_LINKEDIN_CLIENT_SECRET, authorize: 'https://www.linkedin.com/oauth/v2/authorization', token: 'https://www.linkedin.com/oauth/v2/accessToken', userInfo: 'https://api.linkedin.com/v2/userinfo', scope: 'openid profile email', scheme: 'Bearer' },
+    // VK ID endpoints change independently from OAuth 2.0 providers, so they
+    // stay explicit deployment secrets rather than becoming stale hard-coded
+    // URLs in the client bundle.
+    vk: { label: 'VK ID', clientId: process.env.OAUTH_VK_CLIENT_ID, clientSecret: process.env.OAUTH_VK_CLIENT_SECRET, authorize: process.env.OAUTH_VK_AUTHORIZE_URL, token: process.env.OAUTH_VK_TOKEN_URL, userInfo: process.env.OAUTH_VK_USERINFO_URL, scope: process.env.OAUTH_VK_SCOPE || 'email', scheme: 'Bearer' },
+  };
+  const item = common[String(provider || '').toLowerCase()];
+  if (!item || !item.clientId || !item.clientSecret || !item.authorize || !item.token || !item.userInfo || !oauthCallbackUrl(provider)) return null;
+  return item;
+}
+
+function configuredOauthProviders() {
+  return ['vk', 'yandex', 'google', 'github', 'linkedin']
+    .filter((provider) => oauthProvider(provider))
+    .map((provider) => ({ id: provider, label: oauthProvider(provider).label }));
+}
+
+function oauthVerifier() {
+  return randomBytes(48).toString('base64url');
+}
+
+function oauthChallenge(verifier) {
+  return createHash('sha256').update(verifier).digest('base64url');
+}
+
+function safeNextPath(value) {
+  const path = String(value || '/studio');
+  return path.startsWith('/') && !path.startsWith('//') ? path : '/studio';
+}
+
+async function exchangeOAuthIdentity(providerName, provider, code, verifier) {
+  const callback = oauthCallbackUrl(providerName);
+  const body = new URLSearchParams({ grant_type: 'authorization_code', code, client_id: provider.clientId, client_secret: provider.clientSecret, redirect_uri: callback, code_verifier: verifier });
+  const tokenResult = await fetch(provider.token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body,
+    signal: AbortSignal.timeout(20_000),
+  });
+  const token = await tokenResult.json().catch(() => ({}));
+  if (!tokenResult.ok || !token.access_token) throw new Error('Провайдер не выдал токен входа');
+  const profileResult = await fetch(provider.userInfo, {
+    headers: { Authorization: `${provider.scheme} ${token.access_token}`, Accept: 'application/json', ...(providerName === 'github' ? { 'User-Agent': 'Dublika OAuth' } : {}) },
+    signal: AbortSignal.timeout(20_000),
+  });
+  const profile = await profileResult.json().catch(() => ({}));
+  if (!profileResult.ok) throw new Error('Не удалось получить профиль провайдера');
+  let email = String(profile.email || profile.default_email || '').trim().toLowerCase();
+  if (!email && providerName === 'github') {
+    const emailsResult = await fetch('https://api.github.com/user/emails', { headers: { Authorization: `Bearer ${token.access_token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'Dublika OAuth' }, signal: AbortSignal.timeout(20_000) });
+    const emails = await emailsResult.json().catch(() => []);
+    email = String(Array.isArray(emails) ? emails.find((item) => item?.primary && item?.verified)?.email || emails.find((item) => item?.verified)?.email || '' : '').trim().toLowerCase();
+  }
+  const subject = String(profile.sub || profile.id || profile.user_id || profile.uid || '').trim();
+  if (!subject || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('Провайдер не передал подтверждённую почту. Выберите вход по коду.');
+  return { subject, email };
+}
+
+function oauthUser(provider, identity, deviceHash) {
+  const binding = `${provider}:${identity.subject}`;
+  let user = Object.values(state.users).find((candidate) => candidate.oauthBinding === binding || candidate.email === identity.email);
+  if (!user) {
+    const id = `user_${randomUUID()}`;
+    user = { id, email: identity.email, role: 'user', oauthBinding: binding, deviceHash, credits: Object.values(state.users).some((candidate) => candidate.email === identity.email) ? 0 : 3, plan: 'Пробный', createdAt: new Date().toISOString() };
+    state.users[id] = user;
+  } else if (!user.oauthBinding) {
+    user.oauthBinding = binding;
+  }
+  // OAuth redirects do not preserve the browser's custom device header.
+  // Bind the account to the device hash captured before leaving the studio,
+  // rather than to the provider callback request itself.
+  state.devices[deviceHash] = user.id;
+  saveState();
+  return user;
+}
+
+async function handleAuth(request, response, pathname, url) {
+  if (pathname === '/api/auth/providers' && request.method === 'GET') return sendJson(response, 200, { providers: configuredOauthProviders() });
+  if (pathname === '/api/auth/oauth/start' && request.method === 'POST') {
+    rateLimit(request, 'oauth-start', 10, 15 * 60 * 1000);
+    const { provider, next } = await readJson(request);
+    const name = String(provider || '').toLowerCase();
+    const config = oauthProvider(name);
+    if (!config) return sendJson(response, 503, { error: 'Этот способ входа пока не подключён.' });
+    const stateValue = randomBytes(24).toString('base64url');
+    const verifier = oauthVerifier();
+    oauthSessions.set(stateValue, { provider: name, verifier, deviceHash: deviceId(request), next: safeNextPath(next), expiresAt: Date.now() + 10 * 60 * 1000 });
+    const authorize = new URL(config.authorize);
+    authorize.searchParams.set('response_type', 'code');
+    authorize.searchParams.set('client_id', config.clientId);
+    authorize.searchParams.set('redirect_uri', oauthCallbackUrl(name));
+    authorize.searchParams.set('scope', config.scope);
+    authorize.searchParams.set('state', stateValue);
+    authorize.searchParams.set('code_challenge', oauthChallenge(verifier));
+    authorize.searchParams.set('code_challenge_method', 'S256');
+    return sendJson(response, 200, { authorizationUrl: authorize.toString() });
+  }
+  const callback = pathname.match(/^\/api\/auth\/oauth\/(vk|yandex|google|github|linkedin)\/callback$/i);
+  if (callback && request.method === 'GET') {
+    const provider = callback[1].toLowerCase();
+    const stateValue = String(url?.searchParams.get('state') || '');
+    const code = String(url?.searchParams.get('code') || '');
+    const session = oauthSessions.get(stateValue);
+    oauthSessions.delete(stateValue);
+    if (!session || session.provider !== provider || session.expiresAt < Date.now() || !code || !publicOrigin) {
+      response.writeHead(303, { Location: `${publicOrigin || '/'}${publicOrigin ? '/auth?oauth=failed' : ''}` });
+      return response.end();
+    }
+    try {
+      const identity = await exchangeOAuthIdentity(provider, oauthProvider(provider), code, session.verifier);
+      const user = oauthUser(provider, identity, session.deviceHash);
+      const ticket = randomBytes(28).toString('base64url');
+      oauthTickets.set(ticket, { token: signToken(user.id), email: user.email, deviceHash: session.deviceHash, next: session.next, expiresAt: Date.now() + 60_000 });
+      response.writeHead(303, { Location: `${publicOrigin}/auth?oauth_ticket=${encodeURIComponent(ticket)}&next=${encodeURIComponent(session.next)}` });
+      return response.end();
+    } catch {
+      response.writeHead(303, { Location: `${publicOrigin}/auth?oauth=failed` });
+      return response.end();
+    }
+  }
+  if (pathname === '/api/auth/oauth/consume' && request.method === 'POST') {
+    const { ticket } = await readJson(request);
+    const record = oauthTickets.get(String(ticket || ''));
+    oauthTickets.delete(String(ticket || ''));
+    if (!record || record.expiresAt < Date.now() || record.deviceHash !== deviceId(request)) return sendJson(response, 401, { error: 'Сессия входа истекла. Попробуйте ещё раз.' });
+    const user = tokenUser({ headers: { authorization: `Bearer ${record.token}` } });
+    return sendJson(response, 200, { ok: true, token: record.token, user: { email: record.email, credits: user?.credits || 0, plan: user?.plan || 'Пробный' }, next: record.next });
+  }
   if (pathname === '/api/auth/request-code' && request.method === 'POST') {
+    rateLimit(request, 'auth-code', 5, 15 * 60 * 1000);
     const { email } = await readJson(request);
     const normalizedEmail = String(email || '').trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return sendJson(response, 400, { error: 'Некорректная почта' });
@@ -268,6 +468,7 @@ async function handleAuth(request, response, pathname) {
     return sendJson(response, 200, { ok: true, expiresIn: 600, ...(localPreview && !delivered ? { devCode: code } : {}) });
   }
   if (pathname === '/api/auth/verify-code' && request.method === 'POST') {
+    rateLimit(request, 'auth-verify', 12, 15 * 60 * 1000);
     const { email, code } = await readJson(request);
     const normalizedEmail = String(email || '').trim().toLowerCase();
     const record = otpRequests.get(normalizedEmail);
@@ -285,13 +486,99 @@ async function handleAuth(request, response, pathname) {
         user = deviceOwner;
       } else {
         const id = `user_${randomUUID()}`;
-        user = { id, email: normalizedEmail, deviceHash: record.deviceHash, credits: deviceOwnerId ? 0 : 3, plan: 'Пробный', createdAt: new Date().toISOString() };
+        user = { id, email: normalizedEmail, role: 'user', deviceHash: record.deviceHash, credits: deviceOwnerId ? 0 : 3, plan: 'Пробный', createdAt: new Date().toISOString() };
         state.users[id] = user;
       }
     }
     state.devices[record.deviceHash] = user.id;
     saveState();
     return sendJson(response, 200, { ok: true, token: signToken(user.id), user: { email: user.email, credits: user.credits, plan: user.plan } });
+  }
+  return false;
+}
+
+const billingPlans = {
+  start: { label: 'Старт', amount: '150.00', credits: 5, plan: 'Старт' },
+  author: { label: 'Автор', amount: '490.00', credits: 25, plan: 'Автор' },
+};
+
+function billingReady() {
+  return Boolean(yooKassaShopId && yooKassaSecret && publicOrigin.startsWith('https://'));
+}
+
+async function yooKassaRequest(path, init = {}) {
+  if (!billingReady()) throw Object.assign(new Error('Оплата ещё не подключена. Добавьте ключи ЮKassa и публичный HTTPS-адрес приложения на сервере.'), { statusCode: 503 });
+  const credentials = Buffer.from(`${yooKassaShopId}:${yooKassaSecret}`).toString('base64');
+  const response = await fetch(`https://api.yookassa.ru/v3${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Basic ${credentials}`,
+      'Content-Type': 'application/json',
+      ...(init.headers || {}),
+    },
+    signal: AbortSignal.timeout(20_000),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw Object.assign(new Error(`Платёжный сервис временно недоступен (${response.status}).`), { statusCode: 502, cause: payload });
+  return payload;
+}
+
+async function handleBilling(request, response, pathname) {
+  if (pathname === '/api/billing/config' && request.method === 'GET') {
+    return sendJson(response, 200, { enabled: billingReady(), provider: billingReady() ? 'yookassa' : null });
+  }
+  if (pathname === '/api/billing/status' && request.method === 'GET') {
+    const user = requireActor(request, { allowLocalGuest: false });
+    return sendJson(response, 200, { credits: user.credits, plan: user.plan });
+  }
+  if (pathname === '/api/billing/create-payment' && request.method === 'POST') {
+    rateLimit(request, 'payment-create', 6, 30 * 60 * 1000);
+    const user = requireActor(request, { allowLocalGuest: false });
+    const body = await readJson(request);
+    const planKey = String(body.plan || '').toLowerCase();
+    const plan = billingPlans[planKey];
+    if (!plan) return sendJson(response, 400, { error: 'Неизвестный тариф' });
+    const localOrderId = randomUUID();
+    const payment = await yooKassaRequest('/payments', {
+      method: 'POST',
+      headers: { 'Idempotence-Key': localOrderId },
+      body: JSON.stringify({
+        amount: { value: plan.amount, currency: 'RUB' },
+        capture: true,
+        confirmation: { type: 'redirect', return_url: `${publicOrigin}/studio?payment=return` },
+        description: `Дублика — пакет «${plan.label}»`,
+        metadata: { dublika_order_id: localOrderId, dublika_user_id: user.id, dublika_plan: planKey },
+      }),
+    });
+    const confirmationUrl = String(payment?.confirmation?.confirmation_url || '');
+    if (!payment?.id || !confirmationUrl) return sendJson(response, 502, { error: 'Платёжный сервис не вернул ссылку на оплату.' });
+    state.payments ??= {};
+    state.payments[payment.id] = { id: payment.id, localOrderId, userId: user.id, plan: planKey, credits: plan.credits, amount: plan.amount, status: payment.status, createdAt: new Date().toISOString() };
+    saveState();
+    return sendJson(response, 201, { ok: true, confirmationUrl });
+  }
+  if (pathname === '/api/billing/yookassa' && request.method === 'POST') {
+    const event = await readJson(request);
+    const paymentId = String(event?.object?.id || '');
+    if (!billingReady() || !paymentId) return sendJson(response, 200, { ok: true });
+    const stored = state.payments?.[paymentId];
+    if (!stored) return sendJson(response, 200, { ok: true });
+    // Webhook bodies are not treated as proof of payment. Verify the object
+    // against the provider API before granting any paid rendering credits.
+    const verified = await yooKassaRequest(`/payments/${encodeURIComponent(paymentId)}`, { method: 'GET' });
+    if (verified.status !== 'succeeded' || verified.paid !== true || String(verified.metadata?.dublika_order_id || '') !== stored.localOrderId) return sendJson(response, 200, { ok: true });
+    if (!stored.creditedAt) {
+      const user = state.users[stored.userId];
+      if (user) {
+        user.credits = Math.max(0, Number(user.credits) || 0) + stored.credits;
+        user.plan = billingPlans[stored.plan]?.plan || user.plan;
+        user.updatedAt = new Date().toISOString();
+      }
+      stored.creditedAt = new Date().toISOString();
+      stored.status = 'succeeded';
+      saveState();
+    }
+    return sendJson(response, 200, { ok: true });
   }
   return false;
 }
@@ -368,6 +655,32 @@ async function videoDuration(path) {
   }
 }
 
+const demoCueTemplate = [
+  { start: 0, end: 2.6, text: 'Это демо-реплика. Скажите её своим голосом.' },
+  { start: 2.8, end: 5.6, text: 'Слушайте оригинал и начинайте говорить в своём темпе.' },
+  { start: 5.9, end: 8.7, text: 'Запись остановится сама — ровно по длине фразы.' },
+  { start: 9.0, end: 11.8, text: 'Готово. Дальше сервис соберёт один чистый ролик.' },
+];
+
+async function ensureDemoVideo() {
+  if (existsSync(demoVideoPath) && statSync(demoVideoPath).size > 20_000) return demoVideoPath;
+  // This is a locally generated, royalty-free test scene. It deliberately
+  // never depends on a third-party CDN, so the first studio walkthrough works
+  // even on an offline or firewalled server.
+  await runFfmpeg([
+    '-y', '-f', 'lavfi', '-i', 'testsrc2=size=720x1280:rate=30',
+    '-f', 'lavfi', '-i', 'sine=frequency=220:sample_rate=48000',
+    '-t', '12', '-shortest',
+    // The level is intentionally modulated in the generated scene. The
+    // waveform shown in the studio is therefore sampled from real changing
+    // audio, rather than looking like a decorative constant-height graphic.
+    '-af', 'volume=0.06+0.16*sin(2*PI*t/1.3)*sin(2*PI*t/1.3):eval=frame,afade=t=in:st=0:d=0.15,afade=t=out:st=11.8:d=0.2',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '25', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', demoVideoPath,
+  ]);
+  return demoVideoPath;
+}
+
 async function durationForProject(project) {
   if (Number.isFinite(project.duration) && project.duration > 0) return project.duration;
   const duration = await videoDuration(project.inputPath);
@@ -440,7 +753,7 @@ async function prepareAccompaniment(project, clips) {
   // mid/side subtraction of the original dialogue.
   await runProcess(
     demucsPythonPath,
-    ['-m', 'demucs.separate', '--name', demucsModel, '--two-stems=vocals', '--device=cpu', '--segment=7', '--out', outputRoot, sourceAudioPath],
+    ['-m', 'demucs.separate', '--name', demucsModel, '--two-stems=vocals', '--device', demucsDevice, '--segment=7', '--out', outputRoot, sourceAudioPath],
     20 * 60 * 1000,
     'AI-разделение звука',
   );
@@ -481,7 +794,11 @@ async function waveformForRange(project, start, end) {
   }
   // Preserve the actual level. The browser draws the original and microphone
   // against one shared scale so equal loudness has equal height on screen.
-  return rawLevels.map((level) => rounded(Math.min(1, Math.max(0, level))));
+  // Timeline positions are fine at centisecond precision, but a waveform is
+  // visibly quantised at that resolution (quiet real audio turns into three
+  // identical bars). Keep four decimals so the canvas reflects the actual
+  // changing source level instead of looking like a decorative placeholder.
+  return rawLevels.map((level) => Number(Math.min(1, Math.max(0, level)).toFixed(4)));
 }
 
 async function waveformForSegment(project, segment) {
@@ -660,11 +977,25 @@ function phraseSegments(units, clipStart, clipEnd) {
     }
   }
 
-  return groups.slice(0, 80).map((sentence) => ({
+  const candidates = groups.slice(0, 80).map((sentence) => ({
     start: rounded(Math.max(clipStart, sentence[0].start)),
     end: rounded(Math.min(clipEnd, sentence[sentence.length - 1].end)),
     text: sentence.map((unit) => unit.text).join(' ').replace(/\s+([,.!?…;:])/g, '$1').trim(),
-  })).filter((segment) => segment.end - segment.start >= Math.min(minSegmentSeconds, clipEnd - clipStart));
+  }));
+
+  // Do not silently throw away a short but meaningful final answer such as
+  // “Да.”.  We borrow only adjacent silence inside the selected clip, never
+  // another phrase, so the recording control remains at least two seconds
+  // without cutting a word or duplicating it in the next cue.
+  return candidates.map((segment, index) => {
+    if (segment.end - segment.start >= minSegmentSeconds || clipEnd - clipStart < minSegmentSeconds) return segment;
+    const previousEnd = index > 0 ? candidates[index - 1].end : clipStart;
+    const nextStart = index < candidates.length - 1 ? candidates[index + 1].start : clipEnd;
+    const preferredEnd = Math.min(clipEnd, nextStart, segment.start + minSegmentSeconds);
+    if (preferredEnd - segment.start >= minSegmentSeconds) return { ...segment, end: rounded(preferredEnd) };
+    const preferredStart = Math.max(clipStart, previousEnd, segment.end - minSegmentSeconds);
+    return { ...segment, start: rounded(preferredStart) };
+  }).filter((segment) => segment.end > segment.start + .24);
 }
 
 function projectClips(project) {
@@ -749,9 +1080,9 @@ async function transcribeWithDeepgram(inputPath, start, end) {
 }
 
 function projectFor(request, id) {
-  const user = actor(request);
+  const user = actor(request, { allowLocalGuest: true });
   const project = state.projects[id];
-  return project && project.userId === user.id ? { user, project } : null;
+  return user && project && project.userId === user.id ? { user, project } : null;
 }
 
 async function analyzeProject(project, body) {
@@ -784,6 +1115,12 @@ async function analyzeProject(project, body) {
   // timeline below. This avoids making a person wait for one Deepgram request
   // after another when they picked several pieces from the source video.
   const analyses = await Promise.all(clips.map(async (clip) => {
+    if (project.isDemo) {
+      const demoSegments = demoCueTemplate
+        .filter((cue) => cue.start >= clip.start - .01 && cue.end <= clip.end + .01)
+        .map((cue) => ({ ...cue }));
+      if (demoSegments.length) return { clip, segments: demoSegments, transcribed: true, noSpeech: false, transcriptionUnavailable: false, preparedDemo: true };
+    }
     let segments = null;
     let transcriptionUnavailable = false;
     try {
@@ -804,7 +1141,7 @@ async function analyzeProject(project, body) {
       segments = manualSegments(clip.start, clip.end, log);
       transcribed = false;
     }
-    return { clip, segments, transcribed, noSpeech, transcriptionUnavailable };
+    return { clip, segments, transcribed, noSpeech, transcriptionUnavailable, preparedDemo: false };
   }));
 
   const collected = [];
@@ -812,6 +1149,7 @@ async function analyzeProject(project, body) {
   const allTranscribed = analyses.every((analysis) => analysis.transcribed);
   const onlyNoSpeech = analyses.every((analysis) => !analysis.transcribed && analysis.noSpeech);
   const hadUnavailableTranscription = analyses.some((analysis) => analysis.transcriptionUnavailable);
+  const hasPreparedDemo = analyses.some((analysis) => analysis.preparedDemo);
   for (const { clip, segments } of analyses) {
     for (const segment of segments) {
       const start = rounded(segment.start);
@@ -838,7 +1176,7 @@ async function analyzeProject(project, body) {
   project.outputUrl = null;
   project.error = null;
   project.progress = 0;
-  const transcriptionMode = allTranscribed ? 'transcribed' : 'manual';
+  const transcriptionMode = hasPreparedDemo ? 'demo' : allTranscribed ? 'transcribed' : 'manual';
   const transcriptionReason = allTranscribed ? null : onlyNoSpeech ? 'no_speech' : hadUnavailableTranscription ? 'unavailable' : 'no_speech';
   project.transcriptionMode = transcriptionMode;
   project.waveforms = {};
@@ -903,12 +1241,16 @@ async function renderProject(user, project) {
     filters.push(`[1:a]atrim=duration=${duration},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=.96[effects]`);
     filters.push('[voice]asplit=2[voice_sc][voice_mix]');
     filters.push('[effects][voice_sc]sidechaincompress=threshold=.024:ratio=6:attack=15:release=260[ducked]');
-    filters.push("[ducked][voice_mix]amix=inputs=2:duration=first:normalize=0:dropout_transition=0:weights='0.72 1',alimiter=limit=.82[aout]");
+    // Apply a broadcast-safe target after the stems and the voice have been
+    // mixed. The final limiter prevents an abrupt peak when two consonants
+    // meet at a cue boundary, while loudnorm keeps all finished videos at a
+    // stable listening level.
+    filters.push("[ducked][voice_mix]amix=inputs=2:duration=first:normalize=0:dropout_transition=0:weights='0.72 1',loudnorm=I=-16:TP=-1.5:LRA=11,alimiter=limit=.92[aout]");
   } else {
-    filters.push('[voice]anull[aout]');
+    filters.push('[voice]loudnorm=I=-16:TP=-1.5:LRA=11,alimiter=limit=.92[aout]');
   }
   args.push('-filter_complex', filters.join(';'));
-  args.push('-map', sourceVideoLabel, '-map', '[aout]', '-c:v', 'libx264', '-preset', 'superfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-b:a', '160k', '-t', String(duration), '-movflags', '+faststart', '-max_muxing_queue_size', '2048', '-progress', 'pipe:2', '-nostats', outputPath);
+  args.push('-map', sourceVideoLabel, '-map', '[aout]', '-c:v', 'libx264', '-preset', videoPreset, '-crf', String(videoCrf), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-b:a', '192k', '-t', String(duration), '-movflags', '+faststart', '-max_muxing_queue_size', '2048', '-progress', 'pipe:2', '-nostats', outputPath);
   await runFfmpeg(args, (chunk) => {
     const match = String(chunk).match(/out_time_ms=(\d+)/);
     if (match) project.progress = Math.min(99, 55 + Math.round((Number(match[1]) / 1_000_000) / duration * 44));
@@ -1021,11 +1363,39 @@ async function handleApi(request, response, url) {
     transcriptionIssue: deepgram.key && !deepgram.valid ? 'invalid_key_format' : null,
     local: true,
   });
-  const authHandled = await handleAuth(request, response, pathname);
+  const authHandled = await handleAuth(request, response, pathname, url);
   if (authHandled !== false) return authHandled;
+  const billingHandled = await handleBilling(request, response, pathname);
+  if (billingHandled !== false) return billingHandled;
+
+  if (pathname === '/api/projects/demo' && request.method === 'POST') {
+    const user = requireActor(request, { allowLocalGuest: true });
+    const inputPath = await ensureDemoVideo();
+    const id = randomUUID();
+    const duration = await videoDuration(inputPath);
+    state.projects[id] = {
+      id,
+      userId: user.id,
+      title: 'Демо-сцена Дублики.mp4',
+      inputPath,
+      size: statSync(inputPath).size,
+      duration,
+      isDemo: true,
+      status: 'uploaded',
+      progress: 0,
+      trim: null,
+      segments: [],
+      recordings: {},
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    saveState();
+    return sendJson(response, 201, { project: { id, title: state.projects[id].title, duration, inputUrl: sourceMediaUrl(state.projects[id]) }, credits: user.credits });
+  }
 
   if (pathname === '/api/projects/upload' && request.method === 'POST') {
-    const user = actor(request);
+    rateLimit(request, 'upload', 12, 60 * 60 * 1000);
+    const user = requireActor(request, { allowLocalGuest: true });
     let headerName = request.headers['x-file-name'];
     try { headerName = decodeURIComponent(String(headerName || '')); } catch { /* use the raw header */ }
     const originalName = safeName(headerName, 'video.mp4');
@@ -1035,14 +1405,18 @@ async function handleApi(request, response, url) {
     const inputPath = join(uploadDir, `${id}${extension}`);
     const size = await saveBody(request, inputPath, maxVideoBytes);
     const duration = await videoDuration(inputPath);
-    if (duration < minSegmentSeconds) return sendJson(response, 422, { error: 'Видео должно быть не короче двух секунд' });
+    if (duration < minSegmentSeconds) {
+      try { unlinkSync(inputPath); } catch { /* invalid uploads are not retained */ }
+      return sendJson(response, 422, { error: 'Видео должно быть не короче двух секунд' });
+    }
     state.projects[id] = { id, userId: user.id, title: originalName, inputPath, size, duration, status: 'uploaded', progress: 0, trim: null, segments: [], recordings: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     saveState();
     return sendJson(response, 201, { project: { id, title: originalName, duration, status: 'uploaded', inputUrl: sourceMediaUrl(state.projects[id]) }, credits: user.credits });
   }
 
   if (pathname === '/api/projects/import' && request.method === 'POST') {
-    const user = actor(request);
+    rateLimit(request, 'import', 8, 60 * 60 * 1000);
+    const user = requireActor(request, { allowLocalGuest: true });
     const body = await readJson(request);
     const source = await validateRemoteUrl(String(body.url || ''));
     const extension = videoExtensions.has(extname(source.pathname).toLowerCase()) ? extname(source.pathname).toLowerCase() : '.mp4';
@@ -1051,7 +1425,10 @@ async function handleApi(request, response, url) {
     const platformHost = /(^|\.)(youtube\.com|youtu\.be|vk\.com|vkvideo\.ru|vk\.ru|vkontakte\.ru)$/i.test(source.hostname);
     const size = platformHost ? await downloadPlatformVideo(source.toString(), inputPath) : await downloadRemote(source.toString(), inputPath);
     const duration = await videoDuration(inputPath);
-    if (duration < minSegmentSeconds) return sendJson(response, 422, { error: 'Видео должно быть не короче двух секунд' });
+    if (duration < minSegmentSeconds) {
+      try { unlinkSync(inputPath); } catch { /* invalid imports are not retained */ }
+      return sendJson(response, 422, { error: 'Видео должно быть не короче двух секунд' });
+    }
     const title = safeName(body.title || source.pathname.split('/').pop(), 'Видео по ссылке');
     state.projects[id] = { id, userId: user.id, title, inputPath, size, duration, sourceUrl: source.toString(), status: 'uploaded', progress: 0, trim: null, segments: [], recordings: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     saveState();
@@ -1059,7 +1436,7 @@ async function handleApi(request, response, url) {
   }
 
   if (pathname === '/api/projects' && request.method === 'GET') {
-    const user = actor(request);
+    const user = requireActor(request, { allowLocalGuest: true });
     const projects = Object.values(state.projects).filter((project) => project.userId === user.id).map(({ inputPath: _input, outputPath: _output, recordings: _recordings, accompaniment: _accompaniment, ...project }) => ({
       ...project,
       inputUrl: sourceMediaUrl(project),
@@ -1086,6 +1463,21 @@ async function handleApi(request, response, url) {
     return sendJson(response, 200, { levels: await waveformForRange(access.project, start, end) });
   }
 
+  const segmentTextMatch = pathname.match(/^\/api\/projects\/([a-f0-9-]+)\/segments\/text$/i);
+  if (segmentTextMatch && request.method === 'POST') {
+    const access = projectFor(request, segmentTextMatch[1]);
+    if (!access) return sendJson(response, 401, { error: 'Войдите в аккаунт, чтобы изменить проект.' });
+    const body = await readJson(request);
+    if (!Array.isArray(body.segments) || body.segments.length > 100) return sendJson(response, 400, { error: 'Некорректный список реплик' });
+    const incoming = new Map(body.segments.map((item) => [Number(item?.id), String(item?.text || '').trim().slice(0, 500)]));
+    for (const segment of access.project.segments) {
+      if (incoming.has(segment.id)) segment.text = incoming.get(segment.id);
+    }
+    access.project.updatedAt = new Date().toISOString();
+    saveState();
+    return sendJson(response, 200, { ok: true });
+  }
+
   const projectMatch = pathname.match(/^\/api\/projects\/([a-f0-9-]+)(?:\/(analyze|render|status)|\/segments\/([0-9]+)(\/waveform)?)?$/i);
   if (!projectMatch) return sendJson(response, 404, { error: 'Маршрут не найден' });
   const access = projectFor(request, projectMatch[1]);
@@ -1100,7 +1492,13 @@ async function handleApi(request, response, url) {
     const segments = project.segments.map((segment) => recordings?.[segment.id] ? { ...segment, audioUrl: takeMediaUrl(project, segment.id) } : segment);
     return sendJson(response, 200, { project: { ...safeProject, segments, inputUrl: sourceMediaUrl(project), outputUrl: project.outputUrl ? outputMediaUrl(project) : null }, credits: user.credits });
   }
-  if (action === 'analyze' && request.method === 'POST') return sendJson(response, 200, await analyzeProject(project, await readJson(request)));
+  if (action === 'analyze' && request.method === 'POST') {
+    // Transcription is a paid external call. Bound it server-side as well as
+    // in the UI, otherwise a scripted client could exhaust an account's API
+    // budget by repeatedly pressing “prepare”.
+    rateLimit(request, 'analyse', 24, 60 * 60 * 1000);
+    return sendJson(response, 200, await analyzeProject(project, await readJson(request)));
+  }
   if (wantsWaveform && request.method === 'GET') {
     const segment = project.segments.find((item) => item.id === segmentId);
     if (!segment) return sendJson(response, 404, { error: 'Реплика не найдена' });
@@ -1108,6 +1506,9 @@ async function handleApi(request, response, url) {
   }
   if (Number.isFinite(segmentId) && request.method === 'POST') {
     if (!project.segments.some((segment) => segment.id === segmentId)) return sendJson(response, 404, { error: 'Реплика не найдена' });
+    rateLimit(request, 'take-upload', 120, 60 * 60 * 1000);
+    const skipped = project.segments.find((segment) => segment.id < segmentId && !project.recordings?.[segment.id]);
+    if (skipped) return sendJson(response, 409, { error: `Сначала запишите реплику ${skipped.id}.` });
     const type = String(request.headers['content-type'] || 'audio/webm').split(';')[0];
     const extension = type.includes('ogg') ? '.ogg' : type.includes('wav') ? '.wav' : type.includes('mp4') ? '.m4a' : '.webm';
     if (!audioExtensions.has(extension)) return sendJson(response, 415, { error: 'Неподдерживаемый аудиоформат' });
@@ -1115,7 +1516,14 @@ async function handleApi(request, response, url) {
     const size = await saveBody(request, takePath, maxAudioBytes);
     const leadIn = Math.min(recordingLeadSeconds, Math.max(0, Number(request.headers['x-recording-lead-in']) || 0));
     const tailOut = Math.min(recordingTailSeconds, Math.max(0, Number(request.headers['x-recording-tail-out']) || 0));
+    const previousTake = project.recordings[segmentId];
     project.recordings[segmentId] = { path: takePath, size, type, leadIn, tailOut, createdAt: new Date().toISOString() };
+    // A replacement take supersedes the old private recording. Retaining all
+    // retries indefinitely both wastes disk and risks an old take being used
+    // by an operator accidentally.
+    if (previousTake?.path && previousTake.path !== takePath) {
+      try { unlinkSync(previousTake.path); } catch { /* the new take remains valid */ }
+    }
     const segment = project.segments.find((item) => item.id === segmentId);
     segment.state = 'ready';
     project.updatedAt = new Date().toISOString();
@@ -1123,7 +1531,10 @@ async function handleApi(request, response, url) {
     return sendJson(response, 201, { ok: true, segmentId, takeUrl: takeMediaUrl(project, segmentId) });
   }
   if (action === 'render' && request.method === 'POST') {
-    if (project.status === 'processing') return sendJson(response, 409, { error: 'Рендер уже выполняется' });
+    // A queued project has already reserved a job.  Starting it again used to
+    // create two ffmpeg processes that wrote the same MP4 concurrently.
+    if (project.status === 'processing' || project.status === 'queued') return sendJson(response, 409, { error: 'Рендер уже выполняется' });
+    rateLimit(request, 'render', 12, 60 * 60 * 1000);
     const body = await readJson(request);
     if (Array.isArray(body.segments)) {
       for (const incoming of body.segments) {
@@ -1131,8 +1542,23 @@ async function handleApi(request, response, url) {
         if (segment) segment.text = String(incoming.text || segment.text).slice(0, 500);
       }
     }
-    renderProject(user, project).catch((error) => { project.status = 'failed'; project.error = String(error.message || error).slice(-1000); saveState(); });
-    return sendJson(response, 202, { ok: true, status: 'processing' });
+    project.status = activeRenderCount >= maxConcurrentRenders ? 'queued' : 'processing';
+    project.progress = 0;
+    project.error = null;
+    saveState();
+    void withRenderSlot(async () => {
+      project.status = 'processing';
+      project.progress = 2;
+      saveState();
+      try {
+        await renderProject(user, project);
+      } catch (error) {
+        project.status = 'failed';
+        project.error = String(error.message || error).slice(-1000);
+        saveState();
+      }
+    });
+    return sendJson(response, 202, { ok: true, status: project.status });
   }
   if (action === 'status' && request.method === 'GET') return sendJson(response, 200, { status: project.status, progress: project.progress || 0, error: project.error || null, outputUrl: project.outputUrl ? outputMediaUrl(project) : null, credits: user.credits });
   return sendJson(response, 405, { error: 'Метод не поддерживается' });
@@ -1208,8 +1634,9 @@ const server = createServer((request, response) => stateContext.run(requestStore
   }
 }));
 
-server.listen(port, '127.0.0.1', () => {
-  console.log(`\nДублика запущена: http://localhost:${port}`);
+server.listen(port, bindHost, () => {
+  console.log(`\nДублика запущена: ${bindHost === '127.0.0.1' ? `http://localhost:${port}` : `http://${bindHost}:${port}`}`);
   console.log(`FFmpeg: ${ffmpegPath}`);
-  console.log('Исходники и результаты хранятся только в .local-data на этом компьютере.\n');
+  console.log(`Рендеров одновременно: ${maxConcurrentRenders}; Demucs: ${demucsModel}/${demucsDevice}`);
+  console.log('Исходники и результаты хранятся в изолированном хранилище сервера.\n');
 });
