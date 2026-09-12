@@ -1628,8 +1628,12 @@ const server = createServer((request, response) => stateContext.run(requestStore
     if (!path.startsWith(publicDir) || !existsSync(path) || statSync(path).isDirectory()) path = join(publicDir, 'index.html');
     return sendFile(request, response, path);
   } catch (error) {
-    console.error(error);
     const status = error.message === 'payload_too_large' ? 413 : Number(error.statusCode) || 500;
+    // Authentication, validation and rate-limit rejections are expected at an
+    // Internet edge. Keep their diagnostics compact; only unexpected 5xx
+    // failures need a full stack trace in the operator log.
+    if (status >= 500) console.error(error);
+    else console.warn(`[dublika] ${status} ${request.method || 'REQUEST'} ${request.url || '/'}`);
     return sendJson(response, status, { error: String(error.message || 'Ошибка сервера') });
   }
 }));
