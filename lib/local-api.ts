@@ -8,6 +8,10 @@ function apiOrigin() {
   if (publicOrigin) return publicOrigin;
   const { hostname, origin } = window.location;
   if (hostname === 'localhost' || hostname === '127.0.0.1') return origin;
+  // The Node service also serves the built studio.  A public HTTPS tunnel to
+  // that same service is therefore a safe same-origin deployment: use it
+  // directly instead of asking every visitor to configure a local API URL.
+  if (window.location.protocol === 'https:') return origin;
   return String(window.localStorage.getItem('dublika-local-server') || '').trim().replace(/\/$/, '');
 }
 
