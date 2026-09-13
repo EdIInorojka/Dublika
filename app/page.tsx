@@ -101,8 +101,10 @@ type Clip = {
   end: number;
 };
 
-const recordingLeadSeconds = 1;
-const recordingTailSeconds = 1;
+// A take lasts exactly as long as its cue.  The optional three-second
+// countdown is kept separate and happens before recording begins.
+const recordingLeadSeconds = 0;
+const recordingTailSeconds = 0;
 const maxSelectedSeconds = 240;
 const maxSelectedClips = 6;
 
@@ -275,9 +277,8 @@ export default function Home() {
 
   function recordingWindow(segment: Segment) {
     const phraseDuration = Math.max(0.35, segment.end - segment.start);
-    // The recorded take always has a one-second count-in and tail. At the
-    // very beginning of a clip the video simply starts at 0 while the take's
-    // count-in is trimmed during final mixing, so the spoken line stays synced.
+    // A cue's recording window is exactly the cue itself. The preview never
+    // reaches outside the selected clip.
     const leadIn = recordingLeadSeconds;
     const tailOut = recordingTailSeconds;
     const sourceClip = clips.find((clip) => clip.id === segment.clipId)
@@ -1133,7 +1134,7 @@ export default function Home() {
         if (virtualLead > 0) previewStartTimeoutRef.current = window.setTimeout(playPreview, virtualLead * 1000);
         else playPreview();
       }
-      setMessage(`Идёт запись: ${formatTime(recordWindow.leadIn)} до реплики, фраза и ${formatTime(recordWindow.tailOut)} после. Автостоп через ${formatTime(maximumDuration)}.`);
+      setMessage(`Идёт запись реплики. Автостоп через ${formatTime(maximumDuration)}.`);
     } catch {
       if (recordLimitTimeoutRef.current) window.clearTimeout(recordLimitTimeoutRef.current);
       if (recordTickRef.current) window.clearInterval(recordTickRef.current);
@@ -1543,7 +1544,7 @@ export default function Home() {
                     {recording === activeSegment && liveTranscript && <p className="recording-transcript" aria-live="polite"><span>Распознано</span>{liveTranscript}</p>}
                     <div className={`record-limit ${recording === activeSegment ? 'is-recording' : ''}`}><div><span>{recording === activeSegment ? 'Идёт запись' : 'Время на реплику'}</span><strong>{formatTime(recording === activeSegment ? recordRemaining : activeRecordingWindow.duration)}</strong></div><div className="record-limit-track"><i style={{ width: `${recording === activeSegment ? recordProgress : 0}%` }} /></div></div>
                     <div className="record-controls">
-                      <button className={recording === activeSegment ? 'main-record-control is-recording' : 'main-record-control'} type="button" onClick={() => void toggleRecord(activeSegment)} disabled={countdown !== null || activeLine.state === 'saving'}><span>{recording === activeSegment ? <i /> : <Mic />}</span><strong>{recording === activeSegment ? 'Стоп' : activeLine.state === 'saving' ? 'Сохраняем…' : countdown !== null ? `${countdown}…` : 'Записать'}</strong><small>{recording === activeSegment ? `осталось ${formatTime(recordRemaining)}` : `${formatTime(activeRecordingWindow.duration)} с запасом`}</small></button>
+                      <button className={recording === activeSegment ? 'main-record-control is-recording' : 'main-record-control'} type="button" onClick={() => void toggleRecord(activeSegment)} disabled={countdown !== null || activeLine.state === 'saving'}><span>{recording === activeSegment ? <i /> : <Mic />}</span><strong>{recording === activeSegment ? 'Стоп' : activeLine.state === 'saving' ? 'Сохраняем…' : countdown !== null ? `${countdown}…` : 'Записать'}</strong><small>{recording === activeSegment ? `осталось ${formatTime(recordRemaining)}` : formatTime(activeRecordingWindow.duration)}</small></button>
                       <button className={takeIsPlaying ? 'is-playing' : ''} type="button" onClick={() => playTake(activeLine)} disabled={!activeLine.audioUrl || recording !== null}><span>{takeIsPlaying ? <Pause /> : <Headphones />}</span><strong>{takeIsPlaying ? 'Остановить' : 'Мой дубль'}</strong><small>{takeIsPlaying ? 'идёт воспроизведение' : 'прослушать запись'}</small></button>
                       <button type="button" onClick={nextSegment} disabled={recording !== null || countdown !== null}><span><SkipForward /></span><strong>{allSegmentsFinished ? 'Собрать' : 'Дальше'}</strong><small>{allSegmentsFinished ? 'запустить рендер' : 'следующая реплика'}</small></button>
                     </div>

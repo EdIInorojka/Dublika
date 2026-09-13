@@ -65,8 +65,10 @@ const maxSelectedSeconds = 240;
 const minSegmentSeconds = 2;
 const maxSegmentSeconds = 4;
 const maxNaturalSentenceSeconds = 4;
-const recordingLeadSeconds = 1;
-const recordingTailSeconds = 1;
+// Takes must match the cue exactly. The visual countdown happens in the
+// browser before MediaRecorder starts and is not part of recorded media.
+const recordingLeadSeconds = 0;
+const recordingTailSeconds = 0;
 const mediaTokenLifetimeMs = 7 * 24 * 60 * 60 * 1000;
 const videoExtensions = new Set(['.mp4', '.mov', '.webm', '.mkv', '.m4v']);
 const audioExtensions = new Set(['.webm', '.ogg', '.wav', '.m4a', '.mp3', '.mp4']);
@@ -1240,16 +1242,14 @@ async function renderProject(user, project) {
   const firstTakeInput = accompanimentPath ? 2 : 1;
   recorded.forEach((segment, index) => {
     const take = project.recordings[segment.id];
-    // Recordings made before this feature have no padding metadata and remain
-    // sample-aligned. New takes include their one-second lead-in and tail-out.
-    const leadIn = Math.min(recordingLeadSeconds, Math.max(0, Number(take.leadIn) || 0));
+    // New takes have no padding. Preserve the stored one-second lead-in only
+    // for older takes so changing this setting cannot shift existing work.
+    const leadIn = Math.min(1, Math.max(0, Number(take.leadIn) || 0));
     const delay = Math.max(0, Math.round((Number.isFinite(segment.outputStart) ? segment.outputStart : segment.start - project.trim.start) * 1000));
     const spokenDuration = Math.max(.25, segment.end - segment.start);
     const takeEnd = leadIn + spokenDuration;
-    // The extra second captured before and after a cue is only a recording
-    // safety margin. It must never bleed into the next cue in the export.
-    // A short fade removes the click that arose when WebM takes met exactly
-    // at a segment boundary.
+    // A short fade removes clicks when two independently encoded takes meet
+    // at a cue boundary, without extending either take into the next cue.
     const edgeFade = Math.min(.07, spokenDuration / 4);
     const fadeOutAt = Math.max(0, spokenDuration - edgeFade);
     filters.push(`[${firstTakeInput + index}:a]highpass=f=80,lowpass=f=12000,afftdn=nf=-25,acompressor=threshold=-20dB:ratio=3:attack=12:release=150:makeup=2,atrim=start=${leadIn.toFixed(3)}:end=${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${edgeFade.toFixed(3)},afade=t=out:st=${fadeOutAt.toFixed(3)}:d=${edgeFade.toFixed(3)},volume=.82,adelay=${delay}:all=1[t${index}]`);
