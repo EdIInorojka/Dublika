@@ -57,6 +57,20 @@ const maxConcurrentRenders = Math.max(1, Math.min(8, Number(process.env.DUBLIKA_
 const demucsDevice = String(process.env.DUBLIKA_DEMUCS_DEVICE || 'cpu').trim() || 'cpu';
 const videoPreset = String(process.env.DUBLIKA_VIDEO_PRESET || 'veryfast').trim() || 'veryfast';
 const videoCrf = Math.max(17, Math.min(28, Number(process.env.DUBLIKA_VIDEO_CRF || 21) || 21));
+// YouTube may require an authenticated session to pass its anti-bot check.
+// This is opt-in only: set one of the supported browser names in the local
+// environment. yt-dlp reads the browser's encrypted store directly; neither
+// the cookies nor the account data are written to project state or logs.
+const cookieBrowserRaw = String(process.env.DUBLIKA_YTDLP_COOKIES_FROM_BROWSER || '').trim().toLowerCase();
+const supportedCookieBrowsers = new Set(['chrome', 'edge', 'brave', 'chromium', 'firefox', 'opera']);
+const cookieBrowser = supportedCookieBrowsers.has(cookieBrowserRaw) ? cookieBrowserRaw : '';
+const cookieFileRaw = String(process.env.DUBLIKA_YTDLP_COOKIES_FILE || '').trim();
+// The desktop setup may place a short-lived cookies.txt here. `.local-data`
+// is ignored by Git and never served by the API. A deployment can instead use
+// DUBLIKA_YTDLP_COOKIES_FILE to point to its secret volume.
+const defaultCookieFile = join(dataDir, 'youtube-cookies.txt');
+const cookieFileCandidate = cookieFileRaw || (existsSync(defaultCookieFile) ? defaultCookieFile : '');
+const cookieFile = cookieFileCandidate && existsSync(resolve(cookieFileCandidate)) ? resolve(cookieFileCandidate) : '';
 const yooKassaShopId = String(process.env.YOOKASSA_SHOP_ID || '').trim();
 const yooKassaSecret = String(process.env.YOOKASSA_SECRET_KEY || '').trim();
 const maxVideoBytes = 1024 * 1024 * 1024;
@@ -1412,10 +1426,18 @@ async function downloadWithYtDlp(value, destination, platform) {
   // formats. Pinning the already-installed Node runtime prevents yt-dlp from
   // silently falling back to its incomplete no-JS extractor.
   try {
-    await runProcess(ytDlpPath, ['--no-playlist', '--no-warnings', '--no-part', '--max-filesize', '1G', '--js-runtimes', 'node', '--format', format, '--merge-output-format', 'mp4', '--ffmpeg-location', ffmpegDirectory, '--output', destination, url.toString()]);
+    const cookieArgs = platform && cookieFile
+      ? ['--cookies', cookieFile]
+      : platform && cookieBrowser
+        ? ['--cookies-from-browser', cookieBrowser]
+        : [];
+    await runProcess(ytDlpPath, ['--no-playlist', '--no-warnings', '--no-part', '--max-filesize', '1G', '--js-runtimes', 'node', ...cookieArgs, '--format', format, '--merge-output-format', 'mp4', '--ffmpeg-location', ffmpegDirectory, '--output', destination, url.toString()]);
   } catch (error) {
     try { unlinkSync(destination); } catch { /* a partial download is never reused */ }
     console.error(`[dublika] platform import failed: ${String(error.message || error).slice(-1600)}`);
+    if (/sign in to confirm|not a bot/i.test(String(error.message || error))) {
+      throw badRequest('YouTube запросил проверку аккаунта. Попробуйте ещё раз или загрузите файл с устройства.');
+    }
     throw badRequest('Не удалось получить видео из YouTube или VK. Проверьте публичный доступ к ролику или загрузите файл с устройства.');
   }
   if (!existsSync(destination)) throw new Error('Видео не было сохранено');
