@@ -1002,7 +1002,45 @@ function phraseSegments(units, clipStart, clipEnd) {
     }
   }
 
-  const candidates = groups.slice(0, 80).map((sentence) => ({
+  // Merging a series of short sentences can accidentally create an unwieldy
+  // 10+ second card. Re-cut only at recognised word boundaries, preferring
+  // punctuation and pauses nearest three seconds. A short tail stays with its
+  // neighbour whenever possible instead of becoming a 0.9-second take.
+  const cappedGroups = [];
+  for (const sentence of groups) {
+    let cursor = 0;
+    while (cursor < sentence.length) {
+      const start = sentence[cursor].start;
+      const wholeRemaining = sentence.at(-1).end - start;
+      if (wholeRemaining <= maxSegmentSeconds || cursor === sentence.length - 1) {
+        cappedGroups.push(sentence.slice(cursor));
+        break;
+      }
+      const choices = [];
+      for (let index = cursor; index < sentence.length - 1; index += 1) {
+        const duration = sentence[index].end - start;
+        if (duration < minSegmentSeconds) continue;
+        if (duration > maxSegmentSeconds) break;
+        const remaining = sentence.at(-1).end - sentence[index + 1].start;
+        choices.push({ index, duration, remaining, punctuation: hasPhraseEnd(sentence[index].text), softBreak: /[,;:—–-]$/.test(sentence[index].text) });
+      }
+      const viable = choices.filter((choice) => choice.remaining >= minSegmentSeconds);
+      const pool = viable.length ? viable : choices;
+      if (!pool.length) {
+        cappedGroups.push(sentence.slice(cursor));
+        break;
+      }
+      pool.sort((left, right) => {
+        const score = (choice) => Math.abs(choice.duration - 3.15) - (choice.punctuation ? .9 : 0) - (choice.softBreak ? .35 : 0);
+        return score(left) - score(right);
+      });
+      const cut = pool[0].index;
+      cappedGroups.push(sentence.slice(cursor, cut + 1));
+      cursor = cut + 1;
+    }
+  }
+
+  const candidates = cappedGroups.slice(0, 80).map((sentence) => ({
     start: rounded(Math.max(clipStart, sentence[0].start)),
     end: rounded(Math.min(clipEnd, sentence[sentence.length - 1].end)),
     text: sentence.map((unit) => unit.text).join(' ').replace(/\s+([,.!?…;:])/g, '$1').trim(),
@@ -1084,15 +1122,31 @@ async function transcribeWithDeepgram(inputPath, start, end) {
       numerals: 'true',
       mip_opt_out: process.env.DEEPGRAM_MIP_OPT_OUT || 'true',
     });
-    const result = await fetch(`https://api.deepgram.com/v1/listen?${query}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Token ${apiKey}`,
-        'Content-Type': 'audio/mpeg',
-      },
-      body: readFileSync(audioPath),
-      signal: AbortSignal.timeout(120000),
-    });
+    const body = readFileSync(audioPath);
+    let result;
+    let lastError;
+    // A transient DNS/socket reset must not silently downgrade a real video to
+    // empty fixed windows. Retry the same immutable audio once before reporting
+    // the transcription as unavailable.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        result = await fetch(`https://api.deepgram.com/v1/listen?${query}`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Token ${apiKey}`,
+            'Content-Type': 'audio/mpeg',
+          },
+          body,
+          signal: AbortSignal.timeout(120000),
+        });
+        if (result.ok || result.status < 500) break;
+        lastError = new Error(`Deepgram не распознал речь (${result.status})`);
+      } catch (error) {
+        lastError = error;
+      }
+      if (attempt === 0) await new Promise((resolveWait) => setTimeout(resolveWait, 750));
+    }
+    if (!result) throw lastError || new Error('Deepgram недоступен');
     if (!result.ok) {
       const details = (await result.text()).slice(0, 400);
       throw new Error(`Deepgram не распознал речь (${result.status})${details ? `: ${details}` : ''}`);
