@@ -1317,9 +1317,9 @@ export default function Home() {
         if (status.status === 'failed') throw new Error(status.error || 'Не удалось собрать видео');
       }
       throw new Error('Рендер занял слишком много времени');
-    } catch {
+    } catch (cause) {
       setAssembly('idle');
-      setMessage('Не удалось собрать видео. Попробуйте ещё раз.');
+      setMessage(cause instanceof Error && cause.message ? cause.message : 'Не удалось собрать видео. Попробуйте ещё раз.');
     }
   }
 
