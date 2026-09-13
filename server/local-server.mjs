@@ -10,6 +10,29 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import ffmpegPath from 'ffmpeg-static';
 
 const root = resolve(import.meta.dirname, '..');
+// The desktop deployment runs directly with Node, so load an optional local
+// secret file before reading configuration. Environment variables supplied by
+// Docker, a process manager or the OS always win. `.env` is git-ignored.
+function loadLocalEnv() {
+  const envPath = join(root, '.env');
+  try {
+    for (const rawLine of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const separator = line.indexOf('=');
+      if (separator < 1) continue;
+      const key = line.slice(0, separator).trim();
+      let value = line.slice(separator + 1).trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || Object.hasOwn(process.env, key)) continue;
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+      process.env[key] = value;
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+}
+
+loadLocalEnv();
 const publicDir = join(root, 'vercel-dist');
 const dataDir = join(root, '.local-data');
 const uploadDir = join(dataDir, 'uploads');
