@@ -73,6 +73,10 @@ const cookieFileCandidate = cookieFileRaw || (existsSync(defaultCookieFile) ? de
 const cookieFile = cookieFileCandidate && existsSync(resolve(cookieFileCandidate)) ? resolve(cookieFileCandidate) : '';
 const yooKassaShopId = String(process.env.YOOKASSA_SHOP_ID || '').trim();
 const yooKassaSecret = String(process.env.YOOKASSA_SECRET_KEY || '').trim();
+const telegramBotToken = String(process.env.DUBLIKA_TELEGRAM_BOT_TOKEN || '').trim();
+const telegramChatId = String(process.env.DUBLIKA_TELEGRAM_CHAT_ID || '').trim();
+const adminEmails = new Set(String(process.env.DUBLIKA_ADMIN_EMAILS || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean));
+const serviceCheckIntervalMs = Math.max(60_000, Math.min(60 * 60_000, Number(process.env.DUBLIKA_SERVICE_CHECK_INTERVAL_MS || 5 * 60_000) || 5 * 60_000));
 const maxVideoBytes = 1024 * 1024 * 1024;
 const maxAudioBytes = 40 * 1024 * 1024;
 const maxSelectedSeconds = 240;
@@ -102,7 +106,7 @@ const allowedOrigins = new Set([
 for (const directory of [dataDir, uploadDir, recordingDir, outputDir, stemsDir, thumbnailDir]) mkdirSync(directory, { recursive: true });
 
 function initialState() {
-  return { secret: randomBytes(32).toString('hex'), users: {}, devices: {}, projects: {}, payments: {} };
+  return { secret: randomBytes(32).toString('hex'), users: {}, devices: {}, visitors: {}, projects: {}, payments: {}, adminEvents: [] };
 }
 
 function writeState(path, next) {
@@ -122,6 +126,8 @@ const stateContext = new AsyncLocalStorage();
 const requestBuckets = new Map();
 let activeRenderCount = 0;
 const renderWaiters = [];
+const healthAlarmStates = new Map();
+let lastServiceHealth = { checkedAt: null, services: [] };
 
 function activeStore() {
   return stateContext.getStore() || productionStore;
@@ -310,6 +316,7 @@ function actor(request, { allowLocalGuest = false } = {}) {
   state.users[userId] = { id: userId, email: null, role: 'user', deviceHash: hash, credits: freeCredits, plan: 'Пробный', createdAt: new Date().toISOString() };
   state.devices[hash] = userId;
   saveState();
+  recordAdminEvent('visitor', 'Новый посетитель открыл студию', { userId });
   return state.users[userId];
 }
 
@@ -317,6 +324,63 @@ function requireActor(request, options) {
   const user = actor(request, options);
   if (!user) throw Object.assign(new Error('Войдите в аккаунт, чтобы продолжить.'), { statusCode: 401 });
   return user;
+}
+
+function isAdmin(user) {
+  return Boolean(user && (user.role === 'admin' || (user.email && adminEmails.has(String(user.email).toLowerCase()))));
+}
+
+function requireAdmin(request) {
+  const user = requireActor(request, { allowLocalGuest: false });
+  if (!isAdmin(user)) throw Object.assign(new Error('Нет доступа к панели управления.'), { statusCode: 403 });
+  return user;
+}
+
+function maskedEmail(value) {
+  const [name, domain] = String(value || '').split('@');
+  if (!name || !domain) return 'без почты';
+  return `${name.slice(0, 2)}${name.length > 2 ? '•••' : ''}@${domain}`;
+}
+
+function recordAdminEvent(type, text, details = {}) {
+  // Development/QA sessions must never create noise in production operations.
+  if (activeStore().realm !== 'production') return;
+  const event = { id: randomUUID(), type, text: String(text).slice(0, 700), details, createdAt: new Date().toISOString() };
+  state.adminEvents ??= [];
+  state.adminEvents.unshift(event);
+  if (state.adminEvents.length > 120) state.adminEvents.length = 120;
+  saveState();
+  void notifyTelegram(`Дублика · ${event.text}`);
+}
+
+function registerVisitor(request) {
+  if (activeStore().realm !== 'production') return;
+  const hash = deviceId(request);
+  state.visitors ??= {};
+  if (state.visitors[hash]) return;
+  state.visitors[hash] = { firstSeenAt: new Date().toISOString() };
+  saveState();
+  recordAdminEvent('visitor', 'Новый посетитель открыл сайт');
+}
+
+async function notifyTelegram(text) {
+  if (!telegramBotToken || !telegramChatId) return false;
+  try {
+    const result = await fetch(`https://api.telegram.org/bot${telegramBotToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: telegramChatId, text: String(text).slice(0, 3900), disable_web_page_preview: true }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!result.ok) {
+      console.error(`[dublika] Telegram notification failed: HTTP ${result.status}`);
+      return false;
+    }
+    return true;
+  } catch {
+    console.error('[dublika] Telegram notification failed: network error');
+    return false;
+  }
 }
 
 const otpRequests = new Map();
@@ -419,6 +483,7 @@ async function exchangeOAuthIdentity(providerName, provider, code, verifier) {
 function oauthUser(provider, identity, deviceHash) {
   const binding = `${provider}:${identity.subject}`;
   let user = Object.values(state.users).find((candidate) => candidate.oauthBinding === binding || candidate.email === identity.email);
+  const created = !user;
   if (!user) {
     const id = `user_${randomUUID()}`;
     user = { id, email: identity.email, role: 'user', oauthBinding: binding, deviceHash, credits: Object.values(state.users).some((candidate) => candidate.email === identity.email) ? 0 : 3, plan: 'Пробный', createdAt: new Date().toISOString() };
@@ -431,6 +496,7 @@ function oauthUser(provider, identity, deviceHash) {
   // rather than to the provider callback request itself.
   state.devices[deviceHash] = user.id;
   saveState();
+  if (created) recordAdminEvent('registration', `Новая регистрация через ${oauthProvider(provider)?.label || provider}: ${maskedEmail(user.email)}`, { userId: user.id, provider });
   return user;
 }
 
@@ -517,20 +583,24 @@ async function handleAuth(request, response, pathname, url) {
     if (digest !== record.digest) return sendJson(response, 401, { error: 'Неверный код' });
     otpRequests.delete(normalizedEmail);
     let user = Object.values(state.users).find((candidate) => candidate.email === normalizedEmail);
+    let created = false;
     if (!user) {
       const deviceOwnerId = state.devices[record.deviceHash];
       const deviceOwner = deviceOwnerId ? state.users[deviceOwnerId] : null;
       if (deviceOwner?.email === null) {
         deviceOwner.email = normalizedEmail;
         user = deviceOwner;
+        created = true;
       } else {
         const id = `user_${randomUUID()}`;
         user = { id, email: normalizedEmail, role: 'user', deviceHash: record.deviceHash, credits: deviceOwnerId ? 0 : 3, plan: 'Пробный', createdAt: new Date().toISOString() };
         state.users[id] = user;
+        created = true;
       }
     }
     state.devices[record.deviceHash] = user.id;
     saveState();
+    if (created) recordAdminEvent('registration', `Новая регистрация по почте: ${maskedEmail(user.email)}`, { userId: user.id, provider: 'email' });
     return sendJson(response, 200, { ok: true, token: signToken(user.id), user: { email: user.email, credits: user.credits, plan: user.plan } });
   }
   return false;
@@ -606,7 +676,8 @@ async function handleBilling(request, response, pathname) {
     // against the provider API before granting any paid rendering credits.
     const verified = await yooKassaRequest(`/payments/${encodeURIComponent(paymentId)}`, { method: 'GET' });
     if (verified.status !== 'succeeded' || verified.paid !== true || String(verified.metadata?.dublika_order_id || '') !== stored.localOrderId) return sendJson(response, 200, { ok: true });
-    if (!stored.creditedAt) {
+    const justCredited = !stored.creditedAt;
+    if (justCredited) {
       const user = state.users[stored.userId];
       if (user) {
         user.credits = Math.max(0, Number(user.credits) || 0) + stored.credits;
@@ -617,9 +688,99 @@ async function handleBilling(request, response, pathname) {
       stored.status = 'succeeded';
       saveState();
     }
+    if (justCredited) {
+      const user = state.users[stored.userId];
+      recordAdminEvent('payment', `Новая оплата: ${stored.amount} ₽ · тариф «${billingPlans[stored.plan]?.plan || stored.plan}» · ${maskedEmail(user?.email)}`, { paymentId: stored.id, userId: stored.userId, plan: stored.plan, amount: stored.amount });
+    }
     return sendJson(response, 200, { ok: true });
   }
   return false;
+}
+
+async function checkConfiguredService(id, label, configured, request) {
+  const checkedAt = new Date().toISOString();
+  if (!configured) return { id, label, status: 'not_configured', checkedAt, latencyMs: 0 };
+  const startedAt = Date.now();
+  try {
+    const response = await request();
+    return {
+      id,
+      label,
+      status: response.ok ? 'ok' : 'failed',
+      httpStatus: response.status,
+      checkedAt,
+      latencyMs: Date.now() - startedAt,
+    };
+  } catch {
+    return { id, label, status: 'failed', checkedAt, latencyMs: Date.now() - startedAt };
+  }
+}
+
+async function checkServiceHealth({ notify = true } = {}) {
+  const deepgram = deepgramKeyState();
+  const services = [
+    {
+      id: 'media',
+      label: 'Медиа-движок',
+      status: ffmpegPath && existsSync(ffmpegPath) && existsSync(ytDlpPath) ? 'ok' : 'failed',
+      checkedAt: new Date().toISOString(),
+      latencyMs: 0,
+    },
+    await checkConfiguredService('deepgram', 'Deepgram', deepgram.valid, () => fetch('https://api.deepgram.com/v1/projects', {
+      headers: { Authorization: `Token ${deepgram.key}` }, signal: AbortSignal.timeout(15_000),
+    })),
+    await checkConfiguredService('email', 'Resend', Boolean(process.env.RESEND_API_KEY && process.env.OTP_FROM_EMAIL), () => fetch('https://api.resend.com/domains', {
+      headers: { Authorization: `Bearer ${String(process.env.RESEND_API_KEY).trim()}` }, signal: AbortSignal.timeout(15_000),
+    })),
+    await checkConfiguredService('payments', 'ЮKassa', billingReady(), () => fetch('https://api.yookassa.ru/v3/me', {
+      headers: { Authorization: `Basic ${Buffer.from(`${yooKassaShopId}:${yooKassaSecret}`).toString('base64')}` }, signal: AbortSignal.timeout(15_000),
+    })),
+    await checkConfiguredService('telegram', 'Telegram', Boolean(telegramBotToken && telegramChatId), () => fetch(`https://api.telegram.org/bot${telegramBotToken}/getMe`, {
+      signal: AbortSignal.timeout(15_000),
+    })),
+  ];
+  lastServiceHealth = { checkedAt: new Date().toISOString(), services };
+  for (const service of services) {
+    const failed = service.status === 'failed';
+    const previous = healthAlarmStates.get(service.id);
+    if (notify && failed && previous !== 'failed') recordAdminEvent('alert', `Проверка сервиса: ${service.label} недоступен${service.httpStatus ? ` (HTTP ${service.httpStatus})` : ''}`, { service: service.id });
+    if (notify && !failed && previous === 'failed') recordAdminEvent('recovery', `Сервис восстановлен: ${service.label}`, { service: service.id });
+    healthAlarmStates.set(service.id, failed ? 'failed' : service.status);
+  }
+  return lastServiceHealth;
+}
+
+async function handleAdmin(request, response, pathname) {
+  if (!pathname.startsWith('/api/admin/')) return false;
+  requireAdmin(request);
+  if (pathname === '/api/admin/overview' && request.method === 'GET') {
+    const payments = Object.values(state.payments || {});
+    const completedPayments = payments.filter((payment) => payment.status === 'succeeded' || payment.creditedAt);
+    return sendJson(response, 200, {
+      checkedAt: lastServiceHealth.checkedAt,
+      health: lastServiceHealth.services,
+      totals: {
+        visitors: Object.keys(state.visitors || {}).length,
+        users: Object.keys(state.users || {}).length,
+        projects: Object.keys(state.projects || {}).length,
+        payments: completedPayments.length,
+        revenueRub: completedPayments.reduce((total, payment) => total + Number(payment.amount || 0), 0),
+      },
+      events: (state.adminEvents || []).slice(0, 30),
+      telegramConfigured: Boolean(telegramBotToken && telegramChatId),
+    });
+  }
+  if (pathname === '/api/admin/health/check' && request.method === 'POST') {
+    rateLimit(request, 'admin-health', 12, 15 * 60 * 1000);
+    return sendJson(response, 200, await checkServiceHealth());
+  }
+  if (pathname === '/api/admin/telegram/test' && request.method === 'POST') {
+    rateLimit(request, 'admin-telegram-test', 4, 15 * 60 * 1000);
+    if (!telegramBotToken || !telegramChatId) return sendJson(response, 503, { error: 'Telegram-бот ещё не подключён.' });
+    const delivered = await notifyTelegram('Дублика · тестовое сообщение. Уведомления подключены.');
+    return delivered ? sendJson(response, 200, { ok: true }) : sendJson(response, 502, { error: 'Telegram не принял тестовое сообщение. Проверьте токен, chat ID и /start у бота.' });
+  }
+  return sendJson(response, 404, { error: 'Раздел администрирования не найден.' });
 }
 
 function runFfmpeg(argumentsList, onProgress) {
@@ -1451,6 +1612,11 @@ async function downloadPlatformVideo(value, destination) {
 async function handleApi(request, response, url) {
   const { pathname } = url;
   const deepgram = deepgramKeyState();
+  if (pathname === '/api/telemetry/visit' && request.method === 'POST') {
+    rateLimit(request, 'visit', 12, 60 * 60 * 1000);
+    registerVisitor(request);
+    return sendJson(response, 200, { ok: true });
+  }
   if (pathname === '/api/health') return sendJson(response, 200, {
     ok: true,
     ffmpeg: Boolean(ffmpegPath && existsSync(ffmpegPath)),
@@ -1466,6 +1632,8 @@ async function handleApi(request, response, url) {
   if (authHandled !== false) return authHandled;
   const billingHandled = await handleBilling(request, response, pathname);
   if (billingHandled !== false) return billingHandled;
+  const adminHandled = await handleAdmin(request, response, pathname);
+  if (adminHandled !== false) return adminHandled;
 
   if (pathname === '/api/projects/demo' && request.method === 'POST') {
     const user = requireActor(request, { allowLocalGuest: true });
@@ -1741,5 +1909,9 @@ server.listen(port, bindHost, () => {
   console.log(`\nДублика запущена: ${bindHost === '127.0.0.1' ? `http://localhost:${port}` : `http://${bindHost}:${port}`}`);
   console.log(`FFmpeg: ${ffmpegPath}`);
   console.log(`Рендеров одновременно: ${maxConcurrentRenders}; Demucs: ${demucsModel}/${demucsDevice}`);
+  console.log(`Проверка сервисов: каждые ${Math.round(serviceCheckIntervalMs / 60_000)} мин; Telegram: ${telegramBotToken && telegramChatId ? 'подключён' : 'не настроен'}`);
   console.log('Исходники и результаты хранятся в изолированном хранилище сервера.\n');
+  void checkServiceHealth();
+  const serviceTimer = setInterval(() => { void checkServiceHealth(); }, serviceCheckIntervalMs);
+  serviceTimer.unref();
 });

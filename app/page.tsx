@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import {
+  Activity,
   ArrowLeft,
   ArrowRight,
   BadgeCheck,
@@ -24,6 +25,8 @@ import {
   ShieldCheck,
   Sparkles,
   SkipForward,
+  RefreshCw,
+  Send,
   Sun,
   Moon,
   UploadCloud,
@@ -101,6 +104,14 @@ type Clip = {
   end: number;
 };
 
+type AdminOverview = {
+  checkedAt: string | null;
+  health: Array<{ id: string; label: string; status: 'ok' | 'failed' | 'not_configured'; checkedAt: string; latencyMs: number; httpStatus?: number }>;
+  totals: { visitors: number; users: number; projects: number; payments: number; revenueRub: number };
+  events: Array<{ id: string; type: string; text: string; createdAt: string }>;
+  telegramConfigured: boolean;
+};
+
 // A take lasts exactly as long as its cue.  The optional three-second
 // countdown is kept separate and happens before recording begins.
 const recordingLeadSeconds = 0;
@@ -126,6 +137,69 @@ function youtubeEmbedUrl(value: string) {
   } catch {
     return '';
   }
+}
+
+function AdminPanel({ navigate, darkMode, toggleTheme }: { navigate: Navigate; darkMode: boolean; toggleTheme: () => void }) {
+  const [overview, setOverview] = useState<AdminOverview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [checking, setChecking] = useState(false);
+  const [message, setMessage] = useState('');
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      setOverview(await apiFetch<AdminOverview>('/admin/overview'));
+      setMessage('');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Не удалось открыть панель.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { void load(); }, []);
+
+  const checkNow = async () => {
+    setChecking(true);
+    try {
+      const result = await apiFetch<Pick<AdminOverview, 'checkedAt' | 'health'>>('/admin/health/check', { method: 'POST', body: '{}' });
+      setOverview((current) => current ? { ...current, health: result.health, checkedAt: result.checkedAt } : current);
+      setMessage('Проверка сервисов выполнена.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Не удалось выполнить проверку.');
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const testTelegram = async () => {
+    try {
+      await apiFetch('/admin/telegram/test', { method: 'POST', body: '{}' });
+      setMessage('Тестовое сообщение отправлено в Telegram.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Telegram не ответил.');
+    }
+  };
+
+  return <div className="admin-page">
+    <header className="admin-topbar">
+      <button className="brand" type="button" onClick={() => navigate('/dashboard')}><span className="brand-mark"><span>Д</span></span><span className="brand-word">дублика</span></button>
+      <div><button className="icon-button" type="button" onClick={toggleTheme} aria-label={darkMode ? 'Светлая тема' : 'Тёмная тема'}>{darkMode ? <Sun size={18} /> : <Moon size={18} />}</button><button className="secondary-button" type="button" onClick={() => navigate('/dashboard')}>В кабинет</button></div>
+    </header>
+    <main className="admin-main">
+      <section className="admin-heading"><div><p className="eyebrow"><span /> управление</p><h1>Состояние <em>Дублики</em></h1><p>Ключи, оплаты и события без доступа к секретам.</p></div><button className="primary-button" type="button" disabled={checking} onClick={() => void checkNow()}>{checking ? <span className="loader" /> : <RefreshCw size={17} />} Проверить сервисы</button></section>
+      {message && <p className="admin-message">{message}</p>}
+      {loading ? <div className="admin-loading"><span className="loader" /> Загружаем панель…</div> : overview && <>
+        <section className="admin-metrics" aria-label="Ключевые показатели">
+          {[['Посетители', overview.totals.visitors], ['Пользователи', overview.totals.users], ['Проекты', overview.totals.projects], ['Оплаты', overview.totals.payments], ['Выручка', `${overview.totals.revenueRub.toLocaleString('ru-RU')} ₽`]].map(([label, value]) => <article key={String(label)}><span>{label}</span><strong>{value}</strong></article>)}
+        </section>
+        <section className="admin-grid">
+          <article className="admin-card"><header><div><Activity size={18} /><div><span>Сервисы</span><small>{overview.checkedAt ? `Проверено ${new Date(overview.checkedAt).toLocaleTimeString('ru-RU')}` : 'Проверка ещё не запускалась'}</small></div></div>{overview.telegramConfigured && <button className="secondary-button" type="button" onClick={() => void testTelegram()}><Send size={15} /> Тест Telegram</button>}</header><div className="service-list">{overview.health.map((service) => <div key={service.id}><span className={`service-dot is-${service.status}`} /><strong>{service.label}</strong><small>{service.status === 'ok' ? `${service.latencyMs} мс` : service.status === 'not_configured' ? 'не подключён' : 'недоступен'}</small></div>)}</div></article>
+          <article className="admin-card"><header><div><ShieldCheck size={18} /><div><span>События</span><small>Последние 30 действий</small></div></div></header><div className="admin-events">{overview.events.length ? overview.events.map((event) => <div key={event.id}><span className={`event-type is-${event.type}`} /><p>{event.text}</p><time>{new Date(event.createdAt).toLocaleString('ru-RU')}</time></div>) : <p>Событий пока нет.</p>}</div></article>
+        </section>
+      </>}
+    </main>
+  </div>;
 }
 
 export default function Home() {
@@ -203,6 +277,12 @@ export default function Home() {
     const handlePopState = () => setRoute(`${window.location.pathname}${window.location.search}${window.location.hash}`);
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  useEffect(() => {
+    // This is deliberately fire-and-forget: a telemetry outage must never
+    // delay the studio or show a message to a visitor.
+    void apiFetch('/telemetry/visit', { method: 'POST', body: '{}' }).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -1381,10 +1461,12 @@ export default function Home() {
     notify: setMessage,
   };
 
+  if (path === '/admin' && signedIn) return <AdminPanel navigate={navigate} darkMode={darkMode} toggleTheme={() => setDarkMode((value) => !value)} />;
+
   if (path !== '/studio' || !signedIn) {
     return (
       <div className="site-root">
-        <ProductPages {...pageProps} route={path === '/studio' && !signedIn ? '/auth?next=/studio' : route} />
+        <ProductPages {...pageProps} route={(path === '/studio' || path === '/admin') && !signedIn ? `/auth?next=${encodeURIComponent(path)}` : route} />
         {message && <output className="toast-message"><Check size={17} /><span>{message}</span><button onClick={() => setMessage('')} aria-label="Закрыть сообщение"><X size={15} /></button></output>}
       </div>
     );
