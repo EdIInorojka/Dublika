@@ -463,6 +463,14 @@ h1 em { color: #397c5d; font-style: normal; }
 .record-limit.is-recording strong { color: var(--acid); }
 .record-controls > button.is-playing { border-color: rgba(117,230,109,.58); background: #203526; box-shadow: inset 0 0 0 1px rgba(117,230,109,.12); }
 .record-controls > button.is-playing > span { background: #75e66d; color: #102018; }
+.preview-volume-controls { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; padding-top: 2px; }
+.preview-volume-controls > div { min-width: 0; display: grid; gap: 7px; padding: 9px 11px; border: 1px solid #2a3c31; border-radius: 11px; background: #111c16; }
+.preview-volume-controls > div > span { display: flex; align-items: center; gap: 6px; color: #aabbb0; font-size: .62rem; font-weight: 760; }
+.preview-volume-controls svg { width: 15px; height: 15px; color: #bced81; }
+.preview-volume-controls b { margin-left: auto; color: #e5f4df; font-family: var(--font-mono); font-size: .59rem; }
+.preview-volume-controls [data-slot="slider-track"] { height: 5px; background: #2d4035; }
+.preview-volume-controls [data-slot="slider-range"] { background: linear-gradient(90deg,#66b279,#c7f45c); }
+.preview-volume-controls [data-slot="slider-thumb"] { width: 15px; height: 15px; border: 3px solid #111c16; background: #d4ff8d; box-shadow: 0 0 0 2px rgba(199,244,92,.16); }
 .segment-queue .take-button.is-playing { border-color: #75be6f; background: #25442c; color: #c9f6c5; }
 .segment-queue { scrollbar-color: #76a875 #101813; scrollbar-width: thin; }
 .segment-queue::-webkit-scrollbar { width: 8px; }
@@ -949,6 +957,7 @@ h1 em { color: #397c5d; font-style: normal; }
 @media (max-width: 720px) {
   .studio-wizard .primary-button,.studio-wizard .primary-button.small { min-height: 58px; font-size: .95rem; }.studio-wizard .secondary-button { min-height: 50px; font-size: .86rem; }.studio-wizard .source-tabs { height: 48px !important; }.studio-wizard .source-tabs [data-slot="tabs-trigger"] { height: 38px; font-size: .78rem; }
   .studio-wizard.is-recording-stage .segment-preview-toggle { min-height: 38px; padding-inline: 11px; font-size: .66rem; }.studio-wizard.is-recording-stage .record-controls > button { min-height: 64px; grid-template-columns: 30px minmax(0,1fr); padding: 7px; }.studio-wizard.is-recording-stage .record-controls > button > span { width: 30px; height: 30px; }.studio-wizard.is-recording-stage .record-controls strong { font-size: .64rem; }.studio-wizard.is-recording-stage .record-controls small { font-size: .48rem; }.studio-wizard.is-recording-stage .segment-queue .line-item { flex-basis: 46px; min-height: 51px; }.studio-wizard.is-recording-stage .segment-queue .line-play { width: 26px; height: 26px; }
+  .studio-wizard.is-recording-stage .preview-volume-controls { gap: 5px; padding-top: 0; }.studio-wizard.is-recording-stage .preview-volume-controls > div { gap: 4px; padding: 5px 7px; border-radius: 8px; }.studio-wizard.is-recording-stage .preview-volume-controls > div > span { gap: 4px; font-size: .5rem; }.studio-wizard.is-recording-stage .preview-volume-controls svg { width: 12px; height: 12px; }.studio-wizard.is-recording-stage .preview-volume-controls b { font-size: .48rem; }.studio-wizard.is-recording-stage .preview-volume-controls [data-slot="slider-track"] { height: 4px; }.studio-wizard.is-recording-stage .preview-volume-controls [data-slot="slider-thumb"] { width: 12px; height: 12px; border-width: 2px; }
   .studio-result-loading { min-height: 46vh; }.studio-result-actions .download-button,.studio-result-actions .secondary-button { min-height: 58px; }
 }
 

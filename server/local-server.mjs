@@ -1490,11 +1490,12 @@ async function renderProject(user, project) {
     // at a cue boundary, without extending either take into the next cue.
     const edgeFade = Math.min(.07, spokenDuration / 4);
     const fadeOutAt = Math.max(0, spokenDuration - edgeFade);
-    // Clean each voice before it reaches the common timeline.  `nf=-25` was
-    // treating parts of ordinary phone speech as noise and left an unnatural,
-    // metallic result.  The new chain removes only the low rumble and gentle
-    // background hiss, then uses slow speech levelling instead of hard gain.
-    filters.push(`[${firstTakeInput + index}:a]aformat=sample_rates=48000:channel_layouts=mono,highpass=f=75,lowpass=f=14000,afftdn=nr=8:nf=-45:tn=1:gs=6,acompressor=threshold=-18dB:ratio=2.5:attack=8:release=180:makeup=1.5,dynaudnorm=f=180:g=11:p=.92:m=6,alimiter=limit=.88,atrim=start=${leadIn.toFixed(3)}:end=${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${edgeFade.toFixed(3)},afade=t=out:st=${fadeOutAt.toFixed(3)}:d=${edgeFade.toFixed(3)},volume=.9,adelay=${delay}:all=1[t${index}]`);
+    // Clean each voice before it reaches the common timeline.  The denoiser
+    // is intentionally light: aggressive noise reduction was shaving off
+    // consonants and making a phone recording metallic.  A wider speech band
+    // plus slower levelling preserves tone first, then removes only rumble,
+    // steady hiss and unsafe peaks.
+    filters.push(`[${firstTakeInput + index}:a]aformat=sample_rates=48000:channel_layouts=mono,highpass=f=65,lowpass=f=15500,afftdn=nr=6:nf=-50:tn=1:gs=5,acompressor=threshold=-21dB:ratio=2.1:attack=12:release=240:makeup=1.3,dynaudnorm=f=240:g=9:p=.95:m=8,alimiter=limit=.9,atrim=start=${leadIn.toFixed(3)}:end=${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${edgeFade.toFixed(3)},afade=t=out:st=${fadeOutAt.toFixed(3)}:d=${edgeFade.toFixed(3)},volume=.94,adelay=${delay}:all=1[t${index}]`);
   });
   const takeLabels = recorded.map((_, index) => `[t${index}]`).join('');
   // Every take is delayed onto its one flattened output timeline.  Because

@@ -248,6 +248,8 @@ export default function Home() {
   const [liveTranscript, setLiveTranscript] = useState('');
   const [, setTranscriptionState] = useState<'idle' | 'listening' | 'unsupported' | 'error'>('idle');
   const [playback, setPlayback] = useState<PlaybackState>(null);
+  const [originalPreviewVolume, setOriginalPreviewVolume] = useState(72);
+  const [takePreviewVolume, setTakePreviewVolume] = useState(100);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [, setBackendOnline] = useState(false);
@@ -1112,11 +1114,11 @@ export default function Home() {
       // Mobile browsers tie microphone and audio-context permissions to the
       // original tap. Initialise both before the optional countdown.
       stream = await navigator.mediaDevices.getUserMedia({
-        // The video preview is muted during recording, so echo cancellation
-        // only damages the timbre here.  Keep the device's light noise
-        // suppression, retain its natural gain, and record at the native
-        // 48 kHz path for the server-side vocal mix.
-        audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: false, channelCount: 1, sampleRate: 48000, sampleSize: 16 },
+        // Ask the device for its full speech-processing path before applying
+        // only gentle studio processing below. On phone microphones this
+        // removes room echo and prevents a quiet line from being lost before
+        // it ever reaches the server-side restoration chain.
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: 48000, sampleSize: 16 },
       });
       recordingInputStreamRef.current = stream;
       const AudioContextConstructor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -1128,7 +1130,7 @@ export default function Home() {
       analyser.smoothingTimeConstant = 0.76;
       const microphone = recordingContext.createMediaStreamSource(stream);
       microphone.connect(analyser);
-      // Capture an already high-quality speech bus.  This is deliberately
+      // Capture an already high-quality speech bus. This stays deliberately
       // gentle; heavier restoration remains on the server so a good mic does
       // not get the hollow sound caused by processing twice.
       const highpass = recordingContext.createBiquadFilter();
@@ -1271,7 +1273,7 @@ export default function Home() {
     const previewWindow = recordingWindow(segment);
     preview.currentTime = Math.min(previewWindow.start, Math.max(0, (preview.duration || previewWindow.end) - 0.2));
     preview.muted = false;
-    preview.volume = 0.72;
+    preview.volume = originalPreviewVolume / 100;
     setPlayback({ kind: 'original', segmentId: segment.id });
     void preview.play().catch(() => setPlayback(null));
     playbackStopTimeoutRef.current = window.setTimeout(stopPlayback, Math.max(350, (previewWindow.end - previewWindow.start) * 1000));
@@ -1323,6 +1325,7 @@ export default function Home() {
     stopPlayback();
     setActiveSegment(item.id);
     const audio = new Audio(item.audioUrl);
+    audio.volume = takePreviewVolume / 100;
     takeAudioRef.current = audio;
     setPlayback({ kind: 'take', segmentId: item.id });
     audio.onended = () => { takeAudioRef.current = null; setPlayback(null); };
@@ -1331,6 +1334,22 @@ export default function Home() {
       setPlayback(null);
       setMessage('Не удалось воспроизвести дубль. Попробуйте записать его ещё раз.');
     });
+  }
+
+  function changeOriginalPreviewVolume(value: number) {
+    const next = Math.max(0, Math.min(100, Math.round(value)));
+    setOriginalPreviewVolume(next);
+    const preview = segmentVideoRef.current;
+    if (preview && playback?.kind === 'original') {
+      preview.muted = next === 0;
+      preview.volume = next / 100;
+    }
+  }
+
+  function changeTakePreviewVolume(value: number) {
+    const next = Math.max(0, Math.min(100, Math.round(value)));
+    setTakePreviewVolume(next);
+    if (takeAudioRef.current && playback?.kind === 'take') takeAudioRef.current.volume = next / 100;
   }
 
   function handleSegmentVideoPlay() {
@@ -1680,6 +1699,10 @@ export default function Home() {
                       <button className={recording === activeSegment ? 'main-record-control is-recording' : 'main-record-control'} type="button" onClick={() => void toggleRecord(activeSegment)} disabled={countdown !== null || activeLine.state === 'saving'}><span>{recording === activeSegment ? <i /> : <Mic />}</span><strong>{recording === activeSegment ? 'Стоп' : activeLine.state === 'saving' ? 'Сохраняем…' : countdown !== null ? `${countdown}…` : 'Записать'}</strong><small>{recording === activeSegment ? `осталось ${formatTime(recordRemaining)}` : formatTime(activeRecordingWindow.duration)}</small></button>
                       <button className={takeIsPlaying ? 'is-playing' : ''} type="button" onClick={() => playTake(activeLine)} disabled={!activeLine.audioUrl || recording !== null}><span>{takeIsPlaying ? <Pause /> : <Headphones />}</span><strong>{takeIsPlaying ? 'Остановить' : 'Мой дубль'}</strong><small>{takeIsPlaying ? 'идёт воспроизведение' : 'прослушать запись'}</small></button>
                       <button type="button" onClick={nextSegment} disabled={recording !== null || countdown !== null}><span><SkipForward /></span><strong>{allSegmentsFinished ? 'Собрать' : 'Дальше'}</strong><small>{allSegmentsFinished ? 'запустить рендер' : 'следующая реплика'}</small></button>
+                    </div>
+                    <div className="preview-volume-controls" aria-label="Громкость предпросмотра">
+                      <div><span><Volume2 /> Оригинал <b>{originalPreviewVolume}%</b></span><Slider value={[originalPreviewVolume]} min={0} max={100} step={1} onValueChange={(value) => changeOriginalPreviewVolume(Array.isArray(value) ? Number(value[0] ?? 0) : Number(value))} aria-label="Громкость оригинального фрагмента" /></div>
+                      <div><span><Headphones /> Мой дубль <b>{takePreviewVolume}%</b></span><Slider value={[takePreviewVolume]} min={0} max={100} step={1} onValueChange={(value) => changeTakePreviewVolume(Array.isArray(value) ? Number(value[0] ?? 0) : Number(value))} aria-label="Громкость записанного дубля" /></div>
                     </div>
                   </div>
                   <div className="line-list segment-queue" aria-label="Список реплик">
