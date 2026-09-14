@@ -988,6 +988,28 @@ h1 em { color: #397c5d; font-style: normal; }
   .studio-wizard.is-recording-stage .record-controls > button { min-height: 76px; }.studio-wizard.is-recording-stage .record-controls strong { font-size: .75rem; }.studio-wizard.is-recording-stage .record-controls > button > span { width: 35px; height: 35px; }.studio-wizard.is-recording-stage .record-controls svg { width: 19px; height: 19px; }
 }
 
+/* The upload and trimming phases use the same confident scale as the final
+   recording room. The progress rail is inside the working column on every
+   step, so its endpoints and cards always share one visual grid. */
+@media (min-width: 721px) {
+  .studio-wizard .workspace-main > .wizard-stepper { width: 100%; min-height: 96px; gap: 30px; margin: 0 0 24px; padding-inline: 6px; }
+  .studio-wizard .workspace-main > .wizard-stepper .step { gap: 13px; font-size: 1.28rem; }
+  .studio-wizard .workspace-main > .wizard-stepper .step-dot { width: 51px; height: 51px; font-size: .9rem; }
+  .studio-wizard .workspace-main > .wizard-stepper .step svg { width: 19px; height: 19px; }
+  .studio-wizard .workspace-main > .wizard-stepper .wizard-back { min-height: 62px; padding-inline: 23px; font-size: 1.08rem; }
+  .studio-wizard .source-card .section-index { width: 54px; height: 54px; border-radius: 15px; font-size: .98rem; }.studio-wizard .source-card .section-header h2 { font-size: 1.9rem; }.studio-wizard .source-card .section-header p { margin-top: 7px; font-size: 1.12rem; }
+  .studio-wizard .source-card .source-tabs [data-slot="tabs-trigger"] { font-size: 1.32rem; }.studio-wizard .source-card .source-tabs svg { width: 21px; height: 21px; }
+  .studio-wizard .source-card .drop-zone { min-height: 184px; padding: 25px; }.studio-wizard .source-card .drop-zone strong { font-size: 1.34rem; }.studio-wizard .source-card .drop-zone small { margin-top: 8px; font-size: 1rem; }.studio-wizard .source-card .upload-orb { width: 62px; height: 62px; }.studio-wizard .source-card .upload-orb svg { width: 31px; height: 31px; }.studio-wizard .source-card .format-pill { font-size: .86rem; }
+  .studio-wizard .source-card .link-input-wrap input { min-height: 70px; font-size: 1.3rem; }.studio-wizard .source-card .link-input-wrap svg { width: 25px; height: 25px; }.studio-wizard .source-card .link-panel .primary-button { min-height: 80px; font-size: 1.2rem; }.studio-wizard .source-card .demo-panel { min-height: 116px; }.studio-wizard .source-card .demo-panel strong { font-size: 1.36rem; }.studio-wizard .source-card .demo-panel span { font-size: 1rem; }
+  .studio-wizard .editor-card .section-index { width: 48px; height: 48px; border-radius: 14px; font-size: .88rem; }.studio-wizard .editor-card .section-header h2 { font-size: 1.52rem; }.studio-wizard .editor-card .section-header p { margin-top: 6px; font-size: .98rem; }.studio-wizard .editor-card .duration-chip { min-height: 42px; padding-inline: 15px; font-size: .94rem; }
+  .studio-wizard .editor-card .timeline-toolbar { min-height: 46px; font-size: .93rem; }.studio-wizard .editor-card .timeline-inputs label,.studio-wizard .editor-card .clip-picker { font-size: .88rem; }.studio-wizard .editor-card .timeline-inputs input { min-height: 58px; font-size: 1.02rem; }.studio-wizard .editor-card .clip-chip button strong { font-size: .98rem; }.studio-wizard .editor-card .clip-chip button span { font-size: .84rem; }
+  .studio-wizard .editor-footer .primary-button { min-height: 79px; padding-inline: 30px; font-size: 1.2rem; }
+  .studio-wizard.is-recording-stage .wave-compare-head { font-size: 1.02rem; }.studio-wizard.is-recording-stage .active-caption span { font-size: 1.2rem; }.studio-wizard.is-recording-stage .active-caption textarea { min-height: 72px; font-size: 1.72rem; }
+}
+@media (max-width: 720px) {
+  .studio-wizard .workspace-main > .wizard-stepper { width: 100%; margin: 0 0 12px; }.studio-wizard .workspace-main > .wizard-stepper .step { font-size: .64rem; }.studio-wizard .workspace-main > .wizard-stepper .step-dot { width: 31px; height: 31px; font-size: .66rem; }
+}
+
 .admin-page { min-height: 100dvh; background: radial-gradient(circle at 10% 0, rgba(199,244,92,.16), transparent 28rem), var(--background); }
 .admin-topbar { height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-inline: clamp(18px,4vw,64px); border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--background) 88%, transparent); backdrop-filter: blur(16px); }
 .admin-topbar > div { display: flex; align-items: center; gap: 8px; }

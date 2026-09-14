@@ -207,6 +207,8 @@ export default function Home() {
   const recordingInputStreamRef = useRef<MediaStream | null>(null);
   const activeRenderProjectRef = useRef<string | null>(null);
   const takeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const backgroundAudioRef = useRef<HTMLAudioElement | null>(null);
+  const backgroundRequestRef = useRef<Promise<string | null> | null>(null);
   const playbackStopTimeoutRef = useRef<number | null>(null);
   const previewStartTimeoutRef = useRef<number | null>(null);
   const recordLimitTimeoutRef = useRef<number | null>(null);
@@ -250,6 +252,8 @@ export default function Home() {
   const [playback, setPlayback] = useState<PlaybackState>(null);
   const [originalPreviewVolume, setOriginalPreviewVolume] = useState(72);
   const [takePreviewVolume, setTakePreviewVolume] = useState(100);
+  const [backgroundUrl, setBackgroundUrl] = useState('');
+  const [backgroundLoading, setBackgroundLoading] = useState(false);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [, setBackendOnline] = useState(false);
@@ -382,6 +386,8 @@ export default function Home() {
     if (recordLimitTimeoutRef.current) window.clearTimeout(recordLimitTimeoutRef.current);
     if (recordTickRef.current) window.clearInterval(recordTickRef.current);
     takeAudioRef.current?.pause();
+    backgroundAudioRef.current?.pause();
+    backgroundAudioRef.current = null;
     try { recognitionRef.current?.stop(); } catch { /* recognition may already be stopped */ }
     recordingInputStreamRef.current?.getTracks().forEach((track) => track.stop());
     recordingInputStreamRef.current = null;
@@ -448,6 +454,9 @@ export default function Home() {
         setActiveClipId(firstClip.id);
         setTrim([firstClip.start, firstClip.end]);
         setSegments(project.segments.map((segment) => segment.audioUrl ? { ...segment, audioUrl: mediaUrl(segment.audioUrl) } : segment));
+        setBackgroundUrl('');
+        setBackgroundLoading(false);
+        backgroundRequestRef.current = null;
         setTextRevision(0);
         setActiveSegment(project.segments[0]?.id || 1);
         setTranscriptionMode(project.transcriptionMode || (project.segments.some((segment) => segment.text) ? 'transcribed' : null));
@@ -595,6 +604,9 @@ export default function Home() {
         body: JSON.stringify({ start: 0, end: project.duration }),
       });
       setSegments(result.segments);
+      setBackgroundUrl('');
+      setBackgroundLoading(false);
+      backgroundRequestRef.current = null;
       setTextRevision(0);
       setTranscriptionMode(result.transcriptionMode);
       setAnalyzed(true);
@@ -889,6 +901,9 @@ export default function Home() {
           body: JSON.stringify({ clips: clips.map((clip) => ({ id: clip.id, start: clip.start, end: clip.end })) }),
         });
         setSegments(result.segments);
+        setBackgroundUrl('');
+        setBackgroundLoading(false);
+        backgroundRequestRef.current = null;
         setTextRevision(0);
         setActiveSegment(result.segments[0]?.id || 1);
         setTranscriptionMode(result.transcriptionMode);
@@ -997,6 +1012,47 @@ export default function Home() {
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSegment, analyzed, originalLevels, recording, segments]);
 
+  function backgroundOffset(segment: Segment) {
+    if (Number.isFinite(segment.outputStart)) return Math.max(0, Number(segment.outputStart));
+    const sorted = [...clips].sort((left, right) => left.start - right.start);
+    const sourceClip = sorted.find((clip) => clip.id === segment.clipId)
+      ?? sorted.find((clip) => segment.start >= clip.start - .01 && segment.end <= clip.end + .01);
+    if (!sourceClip) return 0;
+    return Math.max(0, sorted.filter((clip) => clip.start < sourceClip.start).reduce((total, clip) => total + clip.end - clip.start, 0) + segment.start - sourceClip.start);
+  }
+
+  async function ensurePreviewBackground() {
+    if (backgroundUrl) return backgroundUrl;
+    if (!projectId) return null;
+    if (backgroundRequestRef.current) return backgroundRequestRef.current;
+    setBackgroundLoading(true);
+    const request = apiFetch<{ backgroundUrl: string | null }>(`/projects/${projectId}/preview-background`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      .then((result) => {
+        const url = result.backgroundUrl ? mediaUrl(result.backgroundUrl) : null;
+        setBackgroundUrl(url || '');
+        return url;
+      })
+      .catch(() => null)
+      .finally(() => {
+        backgroundRequestRef.current = null;
+        setBackgroundLoading(false);
+      });
+    backgroundRequestRef.current = request;
+    return request;
+  }
+
+  function startBackgroundTrack(url: string | null, segment: Segment) {
+    backgroundAudioRef.current?.pause();
+    backgroundAudioRef.current = null;
+    if (!url) return;
+    const audio = new Audio(url);
+    audio.preload = 'auto';
+    audio.volume = originalPreviewVolume / 100;
+    try { audio.currentTime = backgroundOffset(segment); } catch { /* browser will apply the seek after metadata */ }
+    backgroundAudioRef.current = audio;
+    void audio.play().catch(() => undefined);
+  }
+
   function stopPlayback() {
     if (playbackStopTimeoutRef.current) window.clearTimeout(playbackStopTimeoutRef.current);
     playbackStopTimeoutRef.current = null;
@@ -1006,6 +1062,12 @@ export default function Home() {
       takeAudioRef.current.pause();
       takeAudioRef.current.currentTime = 0;
       takeAudioRef.current = null;
+    }
+    if (backgroundAudioRef.current) {
+      backgroundAudioRef.current.onended = null;
+      backgroundAudioRef.current.pause();
+      backgroundAudioRef.current.currentTime = 0;
+      backgroundAudioRef.current = null;
     }
     setPlayback(null);
   }
@@ -1261,7 +1323,7 @@ export default function Home() {
     }
   }
 
-  function replayOriginal() {
+  async function replayOriginal() {
     const segment = segments.find((item) => item.id === activeSegment);
     const preview = segmentVideoRef.current;
     if (!segment || !preview) return;
@@ -1270,10 +1332,15 @@ export default function Home() {
       return;
     }
     stopPlayback();
+    const background = await ensurePreviewBackground();
     const previewWindow = recordingWindow(segment);
     preview.currentTime = Math.min(previewWindow.start, Math.max(0, (preview.duration || previewWindow.end) - 0.2));
-    preview.muted = false;
-    preview.volume = originalPreviewVolume / 100;
+    // Preview the separated accompaniment, never the source audio. This is
+    // the same no-vocals stem used by the final render, so the volume slider
+    // controls music and effects without leaking the original dialogue.
+    preview.muted = true;
+    preview.volume = 0;
+    startBackgroundTrack(background, segment);
     setPlayback({ kind: 'original', segmentId: segment.id });
     void preview.play().catch(() => setPlayback(null));
     playbackStopTimeoutRef.current = window.setTimeout(stopPlayback, Math.max(350, (previewWindow.end - previewWindow.start) * 1000));
@@ -1314,7 +1381,7 @@ export default function Home() {
     if (allSegmentsFinished && assembly !== 'processing') void assembleVideo();
   }
 
-  function playTake(item: Segment) {
+  async function playTake(item: Segment) {
     if (!item.audioUrl) { setMessage('Сначала запишите эту реплику.'); return; }
     const isCurrentTake = playback?.kind === 'take' && playback.segmentId === item.id;
     if (isCurrentTake) {
@@ -1324,14 +1391,21 @@ export default function Home() {
     if (recording !== null) stopRecording('manual');
     stopPlayback();
     setActiveSegment(item.id);
+    const background = await ensurePreviewBackground();
     const audio = new Audio(item.audioUrl);
     audio.volume = takePreviewVolume / 100;
     const preview = segmentVideoRef.current;
     const startTake = () => {
       takeAudioRef.current = audio;
+      startBackgroundTrack(background, item);
       setPlayback({ kind: 'take', segmentId: item.id });
       audio.onended = () => {
         if (takeAudioRef.current === audio) takeAudioRef.current = null;
+        // A take can finish slightly before the visual cue. Stop its matching
+        // accompaniment at the same moment instead of letting the next cue's
+        // effects bleed into this preview.
+        backgroundAudioRef.current?.pause();
+        backgroundAudioRef.current = null;
         preview?.pause();
         setPlayback(null);
       };
@@ -1357,11 +1431,7 @@ export default function Home() {
   function changeOriginalPreviewVolume(value: number) {
     const next = Math.max(0, Math.min(100, Math.round(value)));
     setOriginalPreviewVolume(next);
-    const preview = segmentVideoRef.current;
-    if (preview && playback?.kind === 'original') {
-      preview.muted = next === 0;
-      preview.volume = next / 100;
-    }
+    if (backgroundAudioRef.current) backgroundAudioRef.current.volume = next / 100;
   }
 
   function changeTakePreviewVolume(value: number) {
@@ -1619,11 +1689,9 @@ export default function Home() {
           <div><p className="eyebrow"><span /> новый проект</p><h1>Озвучьте видео<br /><em>своим голосом</em></h1></div>
         </section>}
 
-        {!showRecordingView && wizardStepper}
-
         <div id="studio" className="workspace-grid">
           <div className="workspace-main">
-            {showRecordingView && wizardStepper}
+            {wizardStepper}
             {wizardStep === 1 && <section className="surface source-card wizard-panel">
               <div className="section-header">
                 <div><span className="section-index">01</span><div><h2>Добавьте видео</h2><p>Загрузите файл или вставьте ссылку</p></div></div>
@@ -1708,7 +1776,7 @@ export default function Home() {
                     <div className="segment-video-wrap">
                       <video ref={segmentVideoRef} src={videoUrl} playsInline preload="auto" onPlay={handleSegmentVideoPlay} onPause={handleSegmentVideoPause} onSeeking={handleSegmentVideoSeeking} onTimeUpdate={handleSegmentVideoTimeUpdate} />
                       <div className="segment-video-badge"><ListVideo /> {formatTime(activeLine.start)} — {formatTime(activeLine.end)}</div>
-                      <button className="segment-preview-toggle" type="button" onClick={replayOriginal} disabled={recording !== null || countdown !== null}>{originalIsPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}<span>{originalIsPlaying ? 'Остановить' : 'Посмотреть фрагмент'}</span></button>
+                      <button className="segment-preview-toggle" type="button" onClick={() => void replayOriginal()} disabled={recording !== null || countdown !== null || backgroundLoading}>{originalIsPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}<span>{backgroundLoading ? 'Готовим фон…' : originalIsPlaying ? 'Остановить' : 'Посмотреть фрагмент'}</span></button>
                       {countdown !== null && <div className="record-countdown"><span>{countdown}</span><small>приготовьтесь</small></div>}
                     </div>
                     <div className="active-caption"><span>Реплика {activeSegment}</span><textarea rows={2} value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} placeholder="Введите текст реплики" aria-label="Текст активной реплики" /></div>
@@ -1718,11 +1786,11 @@ export default function Home() {
                     <div className={`record-limit ${recording === activeSegment ? 'is-recording' : ''}`}><div><span>{recording === activeSegment ? 'Идёт запись' : 'Время на реплику'}</span><strong>{formatTime(recording === activeSegment ? recordRemaining : activeRecordingWindow.duration)}</strong></div><div className="record-limit-track"><i style={{ width: `${recording === activeSegment ? recordProgress : 0}%` }} /></div></div>
                     <div className="record-controls">
                       <button className={recording === activeSegment ? 'main-record-control is-recording' : 'main-record-control'} type="button" onClick={() => void toggleRecord(activeSegment)} disabled={countdown !== null || activeLine.state === 'saving'}><span>{recording === activeSegment ? <i /> : <Mic />}</span><strong>{recording === activeSegment ? 'Стоп' : activeLine.state === 'saving' ? 'Сохраняем…' : countdown !== null ? `${countdown}…` : 'Записать'}</strong><small>{recording === activeSegment ? `осталось ${formatTime(recordRemaining)}` : formatTime(activeRecordingWindow.duration)}</small></button>
-                      <button className={takeIsPlaying ? 'is-playing' : ''} type="button" onClick={() => playTake(activeLine)} disabled={!activeLine.audioUrl || recording !== null}><span>{takeIsPlaying ? <Pause /> : <Headphones />}</span><strong>{takeIsPlaying ? 'Остановить' : 'Мой дубль'}</strong><small>{takeIsPlaying ? 'идёт воспроизведение' : 'прослушать запись'}</small></button>
+                      <button className={takeIsPlaying ? 'is-playing' : ''} type="button" onClick={() => void playTake(activeLine)} disabled={!activeLine.audioUrl || recording !== null || backgroundLoading}><span>{takeIsPlaying ? <Pause /> : <Headphones />}</span><strong>{takeIsPlaying ? 'Остановить' : 'Мой дубль'}</strong><small>{backgroundLoading ? 'готовим фон' : takeIsPlaying ? 'идёт воспроизведение' : 'прослушать запись'}</small></button>
                       <button type="button" onClick={nextSegment} disabled={recording !== null || countdown !== null}><span><SkipForward /></span><strong>{allSegmentsFinished ? 'Собрать' : 'Дальше'}</strong><small>{allSegmentsFinished ? 'запустить рендер' : 'следующая реплика'}</small></button>
                     </div>
                     <div className="preview-volume-controls" aria-label="Громкость предпросмотра">
-                      <div><span><Volume2 /> Оригинал <b>{originalPreviewVolume}%</b></span><Slider value={[originalPreviewVolume]} min={0} max={100} step={1} onValueChange={(value) => changeOriginalPreviewVolume(Array.isArray(value) ? Number(value[0] ?? 0) : Number(value))} aria-label="Громкость оригинального фрагмента" /></div>
+                      <div><span><Music2 /> Фон и эффекты <b>{originalPreviewVolume}%</b></span><Slider value={[originalPreviewVolume]} min={0} max={100} step={1} onValueChange={(value) => changeOriginalPreviewVolume(Array.isArray(value) ? Number(value[0] ?? 0) : Number(value))} aria-label="Громкость музыки и эффектов" /></div>
                       <div><span><Headphones /> Мой дубль <b>{takePreviewVolume}%</b></span><Slider value={[takePreviewVolume]} min={0} max={100} step={1} onValueChange={(value) => changeTakePreviewVolume(Array.isArray(value) ? Number(value[0] ?? 0) : Number(value))} aria-label="Громкость записанного дубля" /></div>
                     </div>
                   </div>

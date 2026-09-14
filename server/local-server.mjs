@@ -278,6 +278,10 @@ function takeMediaUrl(project, segmentId) {
   return `/media/projects/${project.id}/takes/${segmentId}?access=${encodeURIComponent(signMediaToken(project.id, `take:${segmentId}`))}&realm=${activeStore().realm}`;
 }
 
+function accompanimentMediaUrl(project) {
+  return `/media/projects/${project.id}/background?access=${encodeURIComponent(signMediaToken(project.id, 'background'))}&realm=${activeStore().realm}`;
+}
+
 function outputMediaUrl(project) {
   return `/media/outputs/${project.id}.mp4?access=${encodeURIComponent(signMediaToken(project.id, 'output'))}&realm=${activeStore().realm}`;
 }
@@ -1763,7 +1767,7 @@ async function handleApi(request, response, url) {
     return sendJson(response, 200, { ok: true });
   }
 
-  const projectMatch = pathname.match(/^\/api\/projects\/([a-f0-9-]+)(?:\/(analyze|render|status)|\/segments\/([0-9]+)(\/waveform)?)?$/i);
+  const projectMatch = pathname.match(/^\/api\/projects\/([a-f0-9-]+)(?:\/(analyze|render|status|preview-background)|\/segments\/([0-9]+)(\/waveform)?)?$/i);
   if (!projectMatch) return sendJson(response, 404, { error: 'Маршрут не найден' });
   const access = projectFor(request, projectMatch[1]);
   if (!access) return sendJson(response, 404, { error: 'Проект не найден' });
@@ -1783,6 +1787,14 @@ async function handleApi(request, response, url) {
     // budget by repeatedly pressing “prepare”.
     rateLimit(request, 'analyse', 24, 60 * 60 * 1000);
     return sendJson(response, 200, await analyzeProject(project, await readJson(request)));
+  }
+  if (action === 'preview-background' && request.method === 'POST') {
+    const clips = projectClips(project);
+    if (!clips.length) return sendJson(response, 409, { error: 'Сначала выберите фрагменты' });
+    if (!await sourceHasAudio(project.inputPath)) return sendJson(response, 200, { backgroundUrl: null });
+    rateLimit(request, 'preview-background', 10, 60 * 60 * 1000);
+    await prepareAccompaniment(project, clips);
+    return sendJson(response, 200, { backgroundUrl: accompanimentMediaUrl(project), duration: clips.reduce((total, clip) => total + clip.end - clip.start, 0) });
   }
   if (wantsWaveform && request.method === 'GET') {
     const segment = project.segments.find((item) => item.id === segmentId);
@@ -1849,7 +1861,7 @@ async function handleApi(request, response, url) {
   return sendJson(response, 405, { error: 'Метод не поддерживается' });
 }
 
-const mimeTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.mp4': 'video/mp4', '.webm': 'video/webm' };
+const mimeTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.mp4': 'video/mp4', '.webm': 'video/webm', '.wav': 'audio/wav' };
 
 function sendFile(request, response, path) {
   const stats = statSync(path);
@@ -1892,6 +1904,12 @@ const server = createServer((request, response) => stateContext.run(requestStore
       const project = state.projects[projectSource[1]];
       if (!project || !hasMediaToken(url, project.id, 'source')) return sendJson(response, 403, { error: 'Нет доступа к медиафайлу' });
       return project?.inputPath && existsSync(project.inputPath) ? sendFile(request, response, project.inputPath) : sendJson(response, 404, { error: 'Файл не найден' });
+    }
+    const projectBackground = url.pathname.match(/^\/media\/projects\/([a-f0-9-]+)\/background$/i);
+    if (projectBackground) {
+      const project = state.projects[projectBackground[1]];
+      if (!project || !hasMediaToken(url, project.id, 'background')) return sendJson(response, 403, { error: 'Нет доступа к фоновой дорожке' });
+      return project.accompaniment?.path && existsSync(project.accompaniment.path) ? sendFile(request, response, project.accompaniment.path) : sendJson(response, 404, { error: 'Фоновая дорожка не готова' });
     }
     const projectThumbnail = url.pathname.match(/^\/media\/projects\/([a-f0-9-]+)\/thumbnails\/([0-9]+)$/i);
     if (projectThumbnail) {
