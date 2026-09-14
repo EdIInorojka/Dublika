@@ -204,6 +204,8 @@ export default function Home() {
   const recordingSessionRef = useRef<RecordingSession | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const recordingInputStreamRef = useRef<MediaStream | null>(null);
+  const activeRenderProjectRef = useRef<string | null>(null);
   const takeAudioRef = useRef<HTMLAudioElement | null>(null);
   const playbackStopTimeoutRef = useRef<number | null>(null);
   const previewStartTimeoutRef = useRef<number | null>(null);
@@ -283,11 +285,13 @@ export default function Home() {
   const finishedSegments = segments.filter(isSegmentSaved).length;
   const pendingSegments = segments.filter((item) => !isSegmentSaved(item)).length;
   const allSegmentsFinished = analyzed && segments.length > 0 && pendingSegments === 0 && takeUploads === 0;
-  const currentStep = wizardStep;
+  // Text remains editable inside the recording room; it is not a separate
+  // stop in the workflow.  The visible studio has three clear steps.
+  const currentStep = wizardStep === 4 ? 3 : wizardStep;
   const activeQueuePosition = Math.max(1, segments.findIndex((item) => item.id === activeSegment) + 1);
   const firstPendingId = segments.find((item) => !isSegmentSaved(item))?.id ?? null;
   const studioView = new URLSearchParams(route.split('?')[1] || '').get('view');
-  const showResultView = studioView === 'result' && assembly === 'done' && Boolean(resultUrl);
+  const showResultView = studioView === 'result' && (assembly === 'processing' || (assembly === 'done' && Boolean(resultUrl)));
   const showRecordingView = analyzed && wizardStep === 4 && !showResultView;
   const profileLabel = (() => {
     if (typeof window === 'undefined') return 'Профиль';
@@ -377,6 +381,8 @@ export default function Home() {
     if (recordTickRef.current) window.clearInterval(recordTickRef.current);
     takeAudioRef.current?.pause();
     try { recognitionRef.current?.stop(); } catch { /* recognition may already be stopped */ }
+    recordingInputStreamRef.current?.getTracks().forEach((track) => track.stop());
+    recordingInputStreamRef.current = null;
     recorderRef.current?.stream.getTracks().forEach((track) => track.stop());
     void audioContextRef.current?.close();
   }, []);
@@ -405,8 +411,8 @@ export default function Home() {
     // result link.  The screen still has to follow the URL; previously this
     // early return left people on the recording screen after "Изменить
     // фрагменты" or a browser Back action.
-    if (requestedView === 'edit') setWizardStep(2);
-    else if (requestedView === 'text') setWizardStep(3);
+    if (requestedView === 'edit' || requestedView === 'fragments') setWizardStep(2);
+    else if (requestedView === 'text') setWizardStep(4);
     else if (requestedView === 'record') setWizardStep(4);
     if (!requestedId || requestedId === openedProjectRef.current) return;
     let cancelled = false;
@@ -444,8 +450,8 @@ export default function Home() {
         setActiveSegment(project.segments[0]?.id || 1);
         setTranscriptionMode(project.transcriptionMode || (project.segments.some((segment) => segment.text) ? 'transcribed' : null));
         setAnalyzed(project.segments.length > 0);
-        setWizardStep(requestedView === 'edit' ? 2 : requestedView === 'text' ? 3 : project.segments.length > 0 ? 4 : 2);
-        setAssembly(project.status === 'done' && project.outputUrl ? 'done' : 'idle');
+        setWizardStep(requestedView === 'edit' || requestedView === 'fragments' ? 2 : project.segments.length > 0 ? 4 : 2);
+        setAssembly(project.status === 'processing' ? 'processing' : project.status === 'done' && project.outputUrl ? 'done' : 'idle');
         setResultUrl(project.outputUrl ? mediaUrl(project.outputUrl) : '');
         setCredits(nextCredits);
         setEditorLevels([]);
@@ -472,10 +478,8 @@ export default function Home() {
   }, [activeSegment, analyzed, projectId]);
 
   useEffect(() => {
-    if (!projectId) {
-      setTimelineThumbnails([]);
-      return;
-    }
+    if (!projectId) { setTimelineThumbnails([]); return; }
+    if (!sourceReady || wizardStep !== 2) return;
     let cancelled = false;
     void apiFetch<{ duration: number; thumbnails: string[] }>(`/projects/${projectId}/thumbnails?count=12`)
       .then((result) => {
@@ -483,9 +487,12 @@ export default function Home() {
         if (result.duration > 0) setDuration(result.duration);
         setTimelineThumbnails(result.thumbnails.map((path) => mediaUrl(path)));
       })
-      .catch(() => { if (!cancelled) setTimelineThumbnails([]); });
+      // Keep already rendered thumbnails if a transient request fails.  The
+      // old behaviour replaced real frames with decorative placeholders when
+      // a person returned from the recording step.
+      .catch(() => undefined);
     return () => { cancelled = true; };
-  }, [projectId]);
+  }, [projectId, sourceReady, wizardStep]);
 
   useEffect(() => {
     if (!projectId || !sourceReady || timelineDragging) return;
@@ -524,14 +531,15 @@ export default function Home() {
 
   function studioRouteFor(step: 1 | 2 | 3 | 4) {
     if (step === 1 || !projectId) return '/studio';
-    const view = step === 2 ? 'edit' : step === 3 ? 'text' : 'record';
+    const view = step === 2 ? 'edit' : 'record';
     return `/studio?project=${projectId}&view=${view}`;
   }
 
   function goToWizardStep(step: 1 | 2 | 3 | 4) {
+    const destination = step === 3 ? 4 : step;
     stopPlayback();
-    setWizardStep(step);
-    navigate(studioRouteFor(step));
+    setWizardStep(destination);
+    navigate(studioRouteFor(destination));
   }
 
   function handleSignedIn(email: string) {
@@ -589,8 +597,8 @@ export default function Home() {
       setTranscriptionMode(result.transcriptionMode);
       setAnalyzed(true);
       setActiveSegment(result.segments[0]?.id || 1);
-      setWizardStep(3);
-      navigate(`/studio?project=${project.id}&view=text`);
+      setWizardStep(4);
+      navigate(`/studio?project=${project.id}&view=record`);
       setMessage('Демо-сцена готова. Это пример с заранее написанными репликами.');
     } catch (cause) {
       setSourceReady(false);
@@ -884,8 +892,8 @@ export default function Home() {
         setTranscriptionMode(result.transcriptionMode);
         setAnalyzing(false);
         setAnalyzed(true);
-        setWizardStep(3);
-        navigate(`/studio?project=${projectId}&view=text`);
+        setWizardStep(4);
+        navigate(`/studio?project=${projectId}&view=record`);
         setMessage(result.transcriptionMode === 'transcribed' || result.transcriptionMode === 'demo'
           ? `Готово: ${result.segments.length} реплик. Проверьте текст перед записью.`
           : `Готово: ${result.segments.length} реплик. Добавьте текст перед записью.`);
@@ -1058,6 +1066,8 @@ export default function Home() {
     playbackStopTimeoutRef.current = null;
     try { recognitionRef.current?.stop(); } catch { /* recognition may already be stopped */ }
     recorderRef.current.stop();
+    recordingInputStreamRef.current?.getTracks().forEach((track) => track.stop());
+    recordingInputStreamRef.current = null;
     recorderRef.current.stream.getTracks().forEach((track) => track.stop());
     segmentVideoRef.current?.pause();
     if (animationFrameRef.current) window.cancelAnimationFrame(animationFrameRef.current);
@@ -1102,8 +1112,13 @@ export default function Home() {
       // Mobile browsers tie microphone and audio-context permissions to the
       // original tap. Initialise both before the optional countdown.
       stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+        // The video preview is muted during recording, so echo cancellation
+        // only damages the timbre here.  Keep the device's light noise
+        // suppression, retain its natural gain, and record at the native
+        // 48 kHz path for the server-side vocal mix.
+        audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: false, channelCount: 1, sampleRate: 48000, sampleSize: 16 },
       });
+      recordingInputStreamRef.current = stream;
       const AudioContextConstructor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!AudioContextConstructor) throw new Error('AudioContext is not supported');
       recordingContext = new AudioContextConstructor();
@@ -1111,7 +1126,27 @@ export default function Home() {
       const analyser = recordingContext.createAnalyser();
       analyser.fftSize = 512;
       analyser.smoothingTimeConstant = 0.76;
-      recordingContext.createMediaStreamSource(stream).connect(analyser);
+      const microphone = recordingContext.createMediaStreamSource(stream);
+      microphone.connect(analyser);
+      // Capture an already high-quality speech bus.  This is deliberately
+      // gentle; heavier restoration remains on the server so a good mic does
+      // not get the hollow sound caused by processing twice.
+      const highpass = recordingContext.createBiquadFilter();
+      highpass.type = 'highpass';
+      highpass.frequency.value = 75;
+      highpass.Q.value = .707;
+      const lowpass = recordingContext.createBiquadFilter();
+      lowpass.type = 'lowpass';
+      lowpass.frequency.value = 14000;
+      lowpass.Q.value = .707;
+      const compressor = recordingContext.createDynamicsCompressor();
+      compressor.threshold.value = -20;
+      compressor.knee.value = 14;
+      compressor.ratio.value = 2.2;
+      compressor.attack.value = .006;
+      compressor.release.value = .18;
+      const recordingDestination = recordingContext.createMediaStreamDestination();
+      microphone.connect(highpass).connect(lowpass).connect(compressor).connect(recordingDestination);
       audioContextRef.current = recordingContext;
       if (countdownEnabled) {
         for (const value of [3, 2, 1]) {
@@ -1121,7 +1156,7 @@ export default function Home() {
         setCountdown(null);
       }
       const mimeType = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus'].find((type) => MediaRecorder.isTypeSupported(type));
-      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      const recorder = new MediaRecorder(recordingDestination.stream, mimeType ? { mimeType, audioBitsPerSecond: 160000 } : { audioBitsPerSecond: 160000 });
       latestLevelsRef.current = Array.from({ length: 96 }, () => 0);
       recordingWaveCursorRef.current = 0;
       recordingChunks.current = [];
@@ -1216,6 +1251,7 @@ export default function Home() {
       if (previewStartTimeoutRef.current) window.clearTimeout(previewStartTimeoutRef.current);
       previewStartTimeoutRef.current = null;
       stream?.getTracks().forEach((track) => track.stop());
+      if (recordingInputStreamRef.current === stream) recordingInputStreamRef.current = null;
       if (audioContextRef.current === recordingContext) audioContextRef.current = null;
       void recordingContext?.close();
       setCountdown(null);
@@ -1371,8 +1407,11 @@ export default function Home() {
     if (!analyzed) { setMessage('Сначала подготовьте реплики из выбранного отрывка.'); return; }
     if (pendingSegments > 0 || takeUploads > 0) { setMessage('Сначала дождитесь сохранения и записи всех реплик.'); return; }
     if (!projectId) { setMessage('Не удалось открыть проект. Вернитесь к выбору видео и попробуйте ещё раз.'); return; }
+    activeRenderProjectRef.current = projectId;
     setAssembly('processing');
     setAssemblyProgress(1);
+    setResultUrl('');
+    navigate(`/studio?project=${projectId}&view=result`);
     setMessage('Собираем видео…');
     try {
       await apiFetch<{ ok: boolean }>(`/projects/${projectId}/render`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ segments: segments.map(({ id, text }) => ({ id, text })) }) });
@@ -1381,6 +1420,7 @@ export default function Home() {
         const status = await apiFetch<{ status: string; progress: number; error: string | null; outputUrl: string | null; credits: number }>(`/projects/${projectId}/status`);
         setAssemblyProgress(status.progress);
         if (status.status === 'done' && status.outputUrl) {
+          activeRenderProjectRef.current = null;
           setAssembly('done');
           setResultUrl(mediaUrl(status.outputUrl));
           setCredits(status.credits);
@@ -1393,10 +1433,43 @@ export default function Home() {
       }
       throw new Error('Рендер занял слишком много времени');
     } catch (cause) {
+      activeRenderProjectRef.current = null;
       setAssembly('idle');
+      navigate(`/studio?project=${projectId}&view=record`);
       setMessage(cause instanceof Error && cause.message ? cause.message : 'Не удалось собрать видео. Попробуйте ещё раз.');
     }
   }
+
+  // A render can take several minutes on a real production queue.  Keep the
+  // result screen live if the page was refreshed or the tab was restored
+  // while the server was still assembling the MP4.
+  useEffect(() => {
+    if (assembly !== 'processing' || studioView !== 'result' || !projectId || activeRenderProjectRef.current === projectId) return;
+    let cancelled = false;
+    const checkStatus = async () => {
+      try {
+        const status = await apiFetch<{ status: string; progress: number; error: string | null; outputUrl: string | null; credits: number }>(`/projects/${projectId}/status`);
+        if (cancelled) return;
+        setAssemblyProgress(status.progress);
+        if (status.status === 'done' && status.outputUrl) {
+          setAssembly('done');
+          setResultUrl(mediaUrl(status.outputUrl));
+          setCredits(status.credits);
+          window.localStorage.setItem('dublika-credits', String(status.credits));
+          setMessage('Видео готово. Можно скачать и публиковать.');
+        } else if (status.status === 'failed') {
+          setAssembly('idle');
+          navigate(`/studio?project=${projectId}&view=record`);
+          setMessage(status.error || 'Не удалось собрать видео. Попробуйте ещё раз.');
+        }
+      } catch {
+        // Network hiccups should not throw a person out of the render screen.
+      }
+    };
+    void checkStatus();
+    const timer = window.setInterval(() => void checkStatus(), 1200);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [assembly, navigate, projectId, studioView]);
 
   useEffect(() => {
     if (!renderQueued || !allSegmentsFinished || assembly !== 'idle') return;
@@ -1485,23 +1558,15 @@ export default function Home() {
         {showResultView ? (
           <section className="studio-result-screen" aria-label="Готовый дубляж">
             <header className="studio-result-head">
-              <button className="result-back-button" type="button" onClick={() => goToWizardStep(4)}>
-                <ArrowLeft size={18} /> К репликам
-              </button>
-              <span><BadgeCheck size={17} /> Дубляж готов</span>
+              {assembly === 'done' ? <button className="result-back-button" type="button" onClick={() => goToWizardStep(4)}><ArrowLeft size={18} /> К репликам</button> : <span className="result-processing-kicker"><span className="loader" /> Рендер запущен</span>}
+              <span><BadgeCheck size={17} /> {assembly === 'done' ? 'Дубляж готов' : `${assemblyProgress}%`}</span>
             </header>
             <div className="studio-result-copy">
-              <p className="eyebrow"><span /> результат</p>
-              <h1>Видео собрано.<br /><em>Можно публиковать.</em></h1>
-              <p>Готовый дубляж — можно скачать и публиковать.</p>
+              <p className="eyebrow"><span /> {assembly === 'done' ? 'результат' : 'сборка'}</p>
+              <h1>{assembly === 'done' ? <>Видео собрано.<br /><em>Можно публиковать.</em></> : <>Собираем<br /><em>ваш дубляж.</em></>}</h1>
+              <p>{assembly === 'done' ? 'Готовый дубляж — можно скачать и публиковать.' : 'Очищаем голос, бережно возвращаем музыку и собираем MP4.'}</p>
             </div>
-            <div className="studio-result-player">
-              <video src={resultUrl} controls playsInline />
-            </div>
-            <div className="studio-result-actions">
-              <button className="download-button" type="button" onClick={downloadResult}><Download size={19} /> Скачать MP4</button>
-              <button className="secondary-button" type="button" onClick={() => goToWizardStep(2)}><Scissors size={17} /> Изменить фрагменты</button>
-            </div>
+            {assembly === 'done' ? <><div className="studio-result-player"><video src={resultUrl} controls playsInline /></div><div className="studio-result-actions"><button className="download-button" type="button" onClick={downloadResult}><Download size={19} /> Скачать MP4</button><button className="secondary-button" type="button" onClick={() => goToWizardStep(2)}><Scissors size={17} /> Изменить фрагменты</button></div></> : <div className="studio-result-loading" aria-live="polite"><div className="result-render-orb"><FileVideo size={31} /><i /><i /><i /></div><div><strong>Готовим итоговый файл</strong><span>Это окно обновится автоматически.</span></div><Progress value={assemblyProgress} /></div>}
           </section>
         ) : <>
         {!showRecordingView && <section className="page-heading">
@@ -1509,10 +1574,10 @@ export default function Home() {
         </section>}
 
         <section className="stepper wizard-stepper" aria-label="Прогресс проекта">
-          {wizardStep > 1 && <button className="wizard-back" type="button" onClick={() => goToWizardStep((wizardStep - 1) as 1 | 2 | 3 | 4)}>Назад</button>}
-          {[['01', 'Видео'], ['02', 'Фрагменты'], ['03', 'Текст'], ['04', 'Озвучка']].map(([number, label], index) => (
+          {wizardStep > 1 && <button className="wizard-back" type="button" onClick={() => goToWizardStep(wizardStep === 4 ? 2 : (wizardStep - 1) as 1 | 2 | 3 | 4)}>Назад</button>}
+          {[['01', 'Видео'], ['02', 'Фрагменты'], ['03', 'Озвучка']].map(([number, label], index) => (
             <div className={`step ${index + 1 === currentStep ? 'is-current' : index + 1 < currentStep ? 'is-complete' : ''}`} key={number}>
-              <span className="step-dot">{index + 1 < currentStep ? <Check size={14} /> : number}</span><span>{label}</span>{index < 3 && <i />}
+              <span className="step-dot">{index + 1 < currentStep ? <Check size={14} /> : number}</span><span>{label}</span>{index < 2 && <i />}
             </div>
           ))}
         </section>
@@ -1595,20 +1660,9 @@ export default function Home() {
               </div>
             </section>}
 
-            {wizardStep === 3 && analyzed && <section className="surface cue-review-card wizard-panel">
-              <div className="section-header">
-                <div><span className="section-index">03</span><div><h2>Проверьте текст</h2><p>Исправьте реплики перед записью.</p></div></div>
-                <span className="duration-chip">{segments.length} реплик</span>
-              </div>
-              <div className="cue-review-list" aria-label="Текст реплик">
-                {segments.map((item) => <label className="cue-review-row" key={item.id}><span><b>{item.id}</b><small>{formatTime(item.start)} — {formatTime(item.end)}</small></span><textarea rows={2} value={item.text} onChange={(event) => updateText(item.id, event.target.value)} placeholder="Введите текст реплики" aria-label={`Текст реплики ${item.id}`} /></label>)}
-              </div>
-              <footer className="cue-review-footer"><span><Check size={16} /> Текст сохранится вместе с проектом</span><button className="primary-button" type="button" onClick={() => goToWizardStep(4)}>К записи <ArrowRight size={18} /></button></footer>
-            </section>}
-
             {showRecordingView && (
               <section className="surface dub-console-card">
-                <div className="section-header dub-console-header"><div><span className="section-index">04</span><div><h2>Запишите реплики</h2><p>Выберите реплику и запишите голос.</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
+                <div className="section-header dub-console-header"><div><span className="section-index">03</span><div><h2>Запишите реплики</h2><p>Выберите реплику и запишите голос.</p></div></div><span className="duration-chip">{finishedSegments}/{segments.length} готово</span></div>
                 <div className="dub-console">
                   <div className="dub-workbench">
                     <div className="segment-video-wrap">
