@@ -961,6 +961,33 @@ h1 em { color: #397c5d; font-style: normal; }
   .studio-result-loading { min-height: 46vh; }.studio-result-actions .download-button,.studio-result-actions .secondary-button { min-height: 58px; }
 }
 
+/* Recording controls are handled from a distance, so the working room uses a
+   deliberately large type scale instead of dense dashboard-sized controls. */
+@media (min-width: 721px) {
+  .studio-wizard .primary-button { min-height: 88px; padding-inline: 34px; font-size: 1.34rem; }
+  .studio-wizard .primary-button.small { min-width: 250px; min-height: 88px; font-size: 1.26rem; }
+  .studio-wizard .secondary-button { min-height: 72px; padding-inline: 28px; font-size: 1.12rem; }
+  .studio-wizard .source-tabs { height: 72px !important; padding: 6px !important; }.studio-wizard .source-tabs [data-slot="tabs-trigger"] { height: 58px; padding-inline: 25px; font-size: 1.08rem; }
+  .studio-wizard .timeline-inputs label button,.studio-wizard .timeline-reset,.studio-wizard .add-clip { min-height: 58px; font-size: .91rem; }
+  .studio-wizard.is-recording-stage .wizard-stepper { width: 100%; min-height: 102px; gap: 32px; margin: 0 0 22px; padding-inline: 7px; }
+  .studio-wizard.is-recording-stage .wizard-stepper .step { gap: 14px; font-size: 1.42rem; }
+  .studio-wizard.is-recording-stage .wizard-stepper .step-dot { width: 56px; height: 56px; font-size: .98rem; }
+  .studio-wizard.is-recording-stage .wizard-stepper .step svg { width: 21px; height: 21px; }
+  .studio-wizard.is-recording-stage .wizard-back { min-height: 66px; padding-inline: 25px; font-size: 1.16rem; }
+  .studio-wizard.is-recording-stage .dub-console-header { min-height: 84px; padding-inline: 26px; }.studio-wizard.is-recording-stage .dub-console-header h2 { font-size: 1.36rem; }.studio-wizard.is-recording-stage .dub-console-header p { font-size: .9rem; }.studio-wizard.is-recording-stage .dub-console-header .section-index { width: 49px; height: 49px; font-size: .92rem; }.studio-wizard.is-recording-stage .dub-console-header .duration-chip { min-height: 42px; padding-inline: 16px; font-size: .86rem; }
+  .studio-wizard.is-recording-stage .segment-preview-toggle { min-height: 66px; padding-inline: 24px; border-radius: 16px; font-size: 1.08rem; }.studio-wizard.is-recording-stage .segment-preview-toggle svg { width: 24px; height: 24px; }
+  .studio-wizard.is-recording-stage .active-caption { padding-block: 22px 16px; }.studio-wizard.is-recording-stage .active-caption span { font-size: .82rem; }.studio-wizard.is-recording-stage .active-caption textarea { min-height: 58px; font-size: 1.28rem; line-height: 1.35; }
+  .studio-wizard.is-recording-stage .wave-compare-head { padding-block: 12px; font-size: .88rem; }.studio-wizard.is-recording-stage .live-wave-shell { height: 154px; }
+  .studio-wizard.is-recording-stage .record-limit { margin-top: 13px; padding: 13px 16px; }.studio-wizard.is-recording-stage .record-limit > div:first-child { font-size: .92rem; }.studio-wizard.is-recording-stage .record-limit strong { font-size: 1rem; }.studio-wizard.is-recording-stage .record-limit-track { height: 7px; }
+  .studio-wizard.is-recording-stage .record-controls { margin-top: 14px; gap: 12px; }.studio-wizard.is-recording-stage .record-controls > button { min-height: 134px; grid-template-columns: 58px 1fr; column-gap: 15px; padding: 15px; border-radius: 18px; }.studio-wizard.is-recording-stage .record-controls > button > span { width: 58px; height: 58px; border-radius: 16px; }.studio-wizard.is-recording-stage .record-controls svg { width: 29px; height: 29px; }.studio-wizard.is-recording-stage .record-controls strong { font-size: 1.18rem; }.studio-wizard.is-recording-stage .record-controls small { font-size: .82rem; }
+  .studio-wizard.is-recording-stage .preview-volume-controls { gap: 12px; padding-top: 6px; }.studio-wizard.is-recording-stage .preview-volume-controls > div { gap: 10px; padding: 14px 16px; border-radius: 15px; }.studio-wizard.is-recording-stage .preview-volume-controls > div > span { font-size: .92rem; }.studio-wizard.is-recording-stage .preview-volume-controls svg { width: 21px; height: 21px; }.studio-wizard.is-recording-stage .preview-volume-controls b { font-size: .86rem; }.studio-wizard.is-recording-stage .preview-volume-controls [data-slot="slider-track"] { height: 7px; }.studio-wizard.is-recording-stage .preview-volume-controls [data-slot="slider-thumb"] { width: 20px; height: 20px; }
+}
+@media (max-width: 720px) {
+  .studio-wizard.is-recording-stage .workspace-main { height: 100%; min-height: 0; display: flex; flex-direction: column; }.studio-wizard.is-recording-stage .workspace-main .dub-console-card { flex: 1 1 auto; min-height: 0; height: auto; }
+  .studio-wizard.is-recording-stage .wizard-stepper { flex: 0 0 50px; margin-bottom: 8px; }.studio-wizard.is-recording-stage .wizard-stepper .step { font-size: .64rem; }.studio-wizard.is-recording-stage .wizard-stepper .step-dot { width: 31px; height: 31px; font-size: .66rem; }.studio-wizard.is-recording-stage .wizard-back { min-height: 38px; font-size: .72rem; }
+  .studio-wizard.is-recording-stage .record-controls > button { min-height: 76px; }.studio-wizard.is-recording-stage .record-controls strong { font-size: .75rem; }.studio-wizard.is-recording-stage .record-controls > button > span { width: 35px; height: 35px; }.studio-wizard.is-recording-stage .record-controls svg { width: 19px; height: 19px; }
+}
+
 .admin-page { min-height: 100dvh; background: radial-gradient(circle at 10% 0, rgba(199,244,92,.16), transparent 28rem), var(--background); }
 .admin-topbar { height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-inline: clamp(18px,4vw,64px); border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--background) 88%, transparent); backdrop-filter: blur(16px); }
 .admin-topbar > div { display: flex; align-items: center; gap: 8px; }

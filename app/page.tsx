@@ -1326,14 +1326,32 @@ export default function Home() {
     setActiveSegment(item.id);
     const audio = new Audio(item.audioUrl);
     audio.volume = takePreviewVolume / 100;
-    takeAudioRef.current = audio;
-    setPlayback({ kind: 'take', segmentId: item.id });
-    audio.onended = () => { takeAudioRef.current = null; setPlayback(null); };
-    void audio.play().catch(() => {
-      takeAudioRef.current = null;
-      setPlayback(null);
-      setMessage('Не удалось воспроизвести дубль. Попробуйте записать его ещё раз.');
-    });
+    const preview = segmentVideoRef.current;
+    const startTake = () => {
+      takeAudioRef.current = audio;
+      setPlayback({ kind: 'take', segmentId: item.id });
+      audio.onended = () => {
+        if (takeAudioRef.current === audio) takeAudioRef.current = null;
+        preview?.pause();
+        setPlayback(null);
+      };
+      void audio.play().catch(() => {
+        if (takeAudioRef.current === audio) takeAudioRef.current = null;
+        preview?.pause();
+        setPlayback(null);
+        setMessage('Не удалось воспроизвести дубль. Попробуйте записать его ещё раз.');
+      });
+    };
+    // Start the muted picture first, then the take on the same cue boundary.
+    // The separate audio element retains its own volume slider while the video
+    // gives an immediate visual reference for balancing the recorded voice.
+    if (preview) {
+      const previewWindow = recordingWindow(item);
+      preview.currentTime = Math.min(previewWindow.start, Math.max(0, (preview.duration || previewWindow.end) - 0.2));
+      preview.muted = true;
+      preview.volume = 0;
+      void preview.play().catch(() => undefined).finally(startTake);
+    } else startTake();
   }
 
   function changeOriginalPreviewVolume(value: number) {
@@ -1353,14 +1371,14 @@ export default function Home() {
   }
 
   function handleSegmentVideoPlay() {
-    if (takeAudioRef.current) {
+    if (takeAudioRef.current && playback?.kind !== 'take') {
       takeAudioRef.current.onended = null;
       takeAudioRef.current.pause();
       takeAudioRef.current.currentTime = 0;
       takeAudioRef.current = null;
     }
     if (recorderRef.current?.state === 'recording') setPlayback(null);
-    else setPlayback({ kind: 'original', segmentId: activeSegment });
+    else if (playback?.kind !== 'take') setPlayback({ kind: 'original', segmentId: activeSegment });
   }
 
   function handleSegmentVideoPause() {
@@ -1381,6 +1399,7 @@ export default function Home() {
     if (preview.currentTime < Math.min(sourceClip.end, segment.end + tailOut) - 0.03) return;
     if (recording === segment.id) preview.pause();
     else if (playback?.kind === 'original') stopPlayback();
+    else if (playback?.kind === 'take') stopPlayback();
   }
 
   function handleSegmentVideoSeeking() {
@@ -1537,6 +1556,14 @@ export default function Home() {
   const recordProgress = Math.min(100, recordElapsed / activeRecordingWindow.duration * 100);
   const originalIsPlaying = playback?.kind === 'original' && playback.segmentId === activeSegment;
   const takeIsPlaying = playback?.kind === 'take' && playback.segmentId === activeSegment;
+  const wizardStepper = <section className="stepper wizard-stepper" aria-label="Прогресс проекта">
+    {wizardStep > 1 && <button className="wizard-back" type="button" onClick={() => goToWizardStep(wizardStep === 4 ? 2 : (wizardStep - 1) as 1 | 2 | 3 | 4)}>Назад</button>}
+    {[['01', 'Видео'], ['02', 'Фрагменты'], ['03', 'Озвучка']].map(([number, label], index) => (
+      <div className={`step ${index + 1 === currentStep ? 'is-current' : index + 1 < currentStep ? 'is-complete' : ''}`} key={number}>
+        <span className="step-dot">{index + 1 < currentStep ? <Check size={14} /> : number}</span><span>{label}</span>{index < 2 && <i />}
+      </div>
+    ))}
+  </section>;
   const pageProps = {
     route,
     navigate,
@@ -1592,17 +1619,11 @@ export default function Home() {
           <div><p className="eyebrow"><span /> новый проект</p><h1>Озвучьте видео<br /><em>своим голосом</em></h1></div>
         </section>}
 
-        <section className="stepper wizard-stepper" aria-label="Прогресс проекта">
-          {wizardStep > 1 && <button className="wizard-back" type="button" onClick={() => goToWizardStep(wizardStep === 4 ? 2 : (wizardStep - 1) as 1 | 2 | 3 | 4)}>Назад</button>}
-          {[['01', 'Видео'], ['02', 'Фрагменты'], ['03', 'Озвучка']].map(([number, label], index) => (
-            <div className={`step ${index + 1 === currentStep ? 'is-current' : index + 1 < currentStep ? 'is-complete' : ''}`} key={number}>
-              <span className="step-dot">{index + 1 < currentStep ? <Check size={14} /> : number}</span><span>{label}</span>{index < 2 && <i />}
-            </div>
-          ))}
-        </section>
+        {!showRecordingView && wizardStepper}
 
         <div id="studio" className="workspace-grid">
           <div className="workspace-main">
+            {showRecordingView && wizardStepper}
             {wizardStep === 1 && <section className="surface source-card wizard-panel">
               <div className="section-header">
                 <div><span className="section-index">01</span><div><h2>Добавьте видео</h2><p>Загрузите файл или вставьте ссылку</p></div></div>
