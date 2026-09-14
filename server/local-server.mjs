@@ -1490,7 +1490,11 @@ async function renderProject(user, project) {
     // at a cue boundary, without extending either take into the next cue.
     const edgeFade = Math.min(.07, spokenDuration / 4);
     const fadeOutAt = Math.max(0, spokenDuration - edgeFade);
-    filters.push(`[${firstTakeInput + index}:a]highpass=f=80,lowpass=f=12000,afftdn=nf=-25,acompressor=threshold=-20dB:ratio=3:attack=12:release=150:makeup=2,atrim=start=${leadIn.toFixed(3)}:end=${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${edgeFade.toFixed(3)},afade=t=out:st=${fadeOutAt.toFixed(3)}:d=${edgeFade.toFixed(3)},volume=.82,adelay=${delay}:all=1[t${index}]`);
+    // Clean each voice before it reaches the common timeline.  `nf=-25` was
+    // treating parts of ordinary phone speech as noise and left an unnatural,
+    // metallic result.  The new chain removes only the low rumble and gentle
+    // background hiss, then uses slow speech levelling instead of hard gain.
+    filters.push(`[${firstTakeInput + index}:a]aformat=sample_rates=48000:channel_layouts=mono,highpass=f=75,lowpass=f=14000,afftdn=nr=8:nf=-45:tn=1:gs=6,acompressor=threshold=-18dB:ratio=2.5:attack=8:release=180:makeup=1.5,dynaudnorm=f=180:g=11:p=.92:m=6,alimiter=limit=.88,atrim=start=${leadIn.toFixed(3)}:end=${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${edgeFade.toFixed(3)},afade=t=out:st=${fadeOutAt.toFixed(3)}:d=${edgeFade.toFixed(3)},volume=.9,adelay=${delay}:all=1[t${index}]`);
   });
   const takeLabels = recorded.map((_, index) => `[t${index}]`).join('');
   // Every take is delayed onto its one flattened output timeline.  Because
@@ -1499,14 +1503,17 @@ async function renderProject(user, project) {
   // net, not a gain boost, so adjacent lines cannot produce a volume burst.
   filters.push(`${takeLabels}amix=inputs=${recorded.length}:duration=longest:normalize=0:dropout_transition=0,alimiter=limit=.76[voice]`);
   if (accompanimentPath) {
-    filters.push(`[1:a]atrim=duration=${duration},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=.96[effects]`);
+    filters.push(`[1:a]atrim=duration=${duration},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=.9[effects]`);
     filters.push('[voice]asplit=2[voice_sc][voice_mix]');
-    filters.push('[effects][voice_sc]sidechaincompress=threshold=.024:ratio=6:attack=15:release=260[ducked]');
+    // Duck only while actual speech is present.  A less aggressive ratio and
+    // longer release preserve music/effects without the pumping artefact that
+    // sounded like a burst at a cue boundary.
+    filters.push('[effects][voice_sc]sidechaincompress=threshold=.055:ratio=3.25:attack=18:release=380[ducked]');
     // Apply a broadcast-safe target after the stems and the voice have been
     // mixed. The final limiter prevents an abrupt peak when two consonants
     // meet at a cue boundary, while loudnorm keeps all finished videos at a
     // stable listening level.
-    filters.push("[ducked][voice_mix]amix=inputs=2:duration=first:normalize=0:dropout_transition=0:weights='0.72 1',loudnorm=I=-16:TP=-1.5:LRA=11,alimiter=limit=.92[aout]");
+    filters.push("[ducked][voice_mix]amix=inputs=2:duration=first:normalize=0:dropout_transition=0:weights='0.84 1',loudnorm=I=-16:TP=-1.5:LRA=9,alimiter=limit=.92[aout]");
   } else {
     filters.push('[voice]loudnorm=I=-16:TP=-1.5:LRA=11,alimiter=limit=.92[aout]');
   }

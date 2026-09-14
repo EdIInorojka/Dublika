@@ -888,6 +888,20 @@ h1 em { color: #397c5d; font-style: normal; }
   .studio-app-shell.is-recording-stage .segment-video-wrap video { width: 100%; height: 100%; object-fit: contain; }
 }
 
+/* Recording workspace: the stage is content-sized on desktop.  A `1fr` grid
+   row used to stretch the 16:9 frame to the bottom of tall displays, leaving
+   a large empty panel under vertical videos. */
+@media (min-width: 721px) {
+  .studio-wizard.is-recording-stage .main-area { height: auto; min-height: 0; padding: 14px 0 26px; overflow: visible; }
+  .studio-wizard.is-recording-stage .workspace-grid,
+  .studio-wizard.is-recording-stage .workspace-main { flex: 0 0 auto; height: auto; }
+  .studio-wizard.is-recording-stage .dub-console-card,
+  .studio-wizard.is-recording-stage .dub-console { height: auto; flex: 0 0 auto; }
+  .studio-wizard.is-recording-stage .dub-workbench { flex: 0 0 auto; grid-template-rows: auto auto auto auto auto; overflow: visible; }
+  .studio-wizard.is-recording-stage .segment-video-wrap { align-self: start; min-height: 0; height: auto; max-height: min(54vh, 610px); }
+  .studio-wizard.is-recording-stage .segment-video-wrap video { max-height: min(54vh, 610px); }
+}
+
 .admin-page { min-height: 100dvh; background: radial-gradient(circle at 10% 0, rgba(199,244,92,.16), transparent 28rem), var(--background); }
 .admin-topbar { height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-inline: clamp(18px,4vw,64px); border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--background) 88%, transparent); backdrop-filter: blur(16px); }
 .admin-topbar > div { display: flex; align-items: center; gap: 8px; }
