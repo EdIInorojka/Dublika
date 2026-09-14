@@ -902,6 +902,36 @@ h1 em { color: #397c5d; font-style: normal; }
   .studio-wizard.is-recording-stage .segment-video-wrap video { max-height: min(54vh, 610px); }
 }
 
+/* Keep navigation locked to the same working column as the studio itself.
+   It is deliberately larger than a conventional breadcrumb: it is the only
+   way to move between the three work phases when the console is on screen. */
+@media (min-width: 721px) {
+  .studio-wizard.is-recording-stage .workspace-main,
+  .studio-wizard.is-recording-stage .wizard-stepper {
+    width: min(1120px, 100%);
+    margin-inline: auto;
+  }
+  .studio-wizard.is-recording-stage .wizard-stepper {
+    min-height: 68px;
+    gap: 22px;
+    margin-bottom: 16px;
+  }
+  .studio-wizard.is-recording-stage .wizard-stepper .step {
+    gap: 10px;
+    font-size: 1rem;
+  }
+  .studio-wizard.is-recording-stage .wizard-stepper .step-dot {
+    width: 39px;
+    height: 39px;
+    font-size: .73rem;
+  }
+  .studio-wizard.is-recording-stage .wizard-back {
+    min-height: 49px;
+    padding-inline: 18px;
+    font-size: .9rem;
+  }
+}
+
 /* The studio is used from a distance on a phone and with a mic in hand on a
    desktop.  Its real controls have generous, consistent hit areas. */
 .studio-wizard .primary-button { min-height: 68px; padding-inline: 26px; border-radius: 16px; font-size: 1.05rem; }
@@ -914,7 +944,7 @@ h1 em { color: #397c5d; font-style: normal; }
 .studio-wizard.is-recording-stage .record-controls > button { min-height: 92px; grid-template-columns: 43px 1fr; column-gap: 11px; padding: 11px; border-radius: 14px; }.studio-wizard.is-recording-stage .record-controls > button > span { width: 43px; height: 43px; border-radius: 12px; }.studio-wizard.is-recording-stage .record-controls svg { width: 21px; }.studio-wizard.is-recording-stage .record-controls strong { font-size: .82rem; }.studio-wizard.is-recording-stage .record-controls small { font-size: .64rem; }
 .studio-wizard.is-recording-stage .segment-queue .line-item { flex-basis: 60px; min-height: 70px; }.studio-wizard.is-recording-stage .segment-queue .line-play { width: 34px; height: 34px; }.studio-wizard.is-recording-stage .segment-queue .queue-state { width: 19px; height: 19px; }
 .result-processing-kicker { display: inline-flex; align-items: center; gap: 8px; color: #c9e8a4; font-size: .76rem; font-weight: 800; }.result-processing-kicker .loader { width: 15px; height: 15px; border-color: rgba(201,232,164,.23); border-top-color: #c9e8a4; }
-.studio-result-loading { min-height: min(52vh, 520px); display: grid; place-items: center; align-content: center; gap: 18px; padding: 28px; border: 1px solid #405847; border-radius: 18px; background: radial-gradient(circle at 50% 36%,rgba(186,243,112,.16),transparent 27%),#07110c; text-align: center; }.studio-result-loading > div:nth-child(2) { display: grid; gap: 5px; }.studio-result-loading strong { font-size: 1.08rem; }.studio-result-loading span { color: #9eb1a4; font-size: .8rem; }.studio-result-loading [data-slot="progress-root"] { width: min(360px, 88%); }.studio-result-loading [data-slot="progress-track"] { height: 7px; background: rgba(229,248,226,.15); }.studio-result-loading [data-slot="progress-indicator"] { background: linear-gradient(90deg,#82c566,#d0ff92); }.result-render-orb { position: relative; width: 83px; height: 83px; display: grid; place-items: center; border: 1px solid rgba(201,243,135,.46); border-radius: 25px; color: #d1ff95; background: rgba(15,42,26,.74); box-shadow: 0 0 0 12px rgba(169,229,100,.05),0 18px 42px rgba(0,0,0,.28); }.result-render-orb > i { position: absolute; bottom: -23px; width: 7px; border-radius: 99px; background: linear-gradient(#d1ff95,#63b675); animation: importBars 1.15s ease-in-out infinite alternate; }.result-render-orb > i:nth-of-type(1) { left: 22px; height: 20px; }.result-render-orb > i:nth-of-type(2) { left: 38px; height: 34px; animation-delay: -.45s; }.result-render-orb > i:nth-of-type(3) { left: 54px; height: 24px; animation-delay: -.8s; }
+.studio-result-loading { min-height: min(52vh, 520px); display: grid; place-items: center; align-content: center; gap: 18px; padding: 28px; border: 1px solid #405847; border-radius: 18px; background: radial-gradient(circle at 50% 36%,rgba(186,243,112,.16),transparent 27%),#07110c; text-align: center; }.studio-result-loading > div:nth-child(2) { display: grid; gap: 5px; }.studio-result-loading strong { font-size: 1.08rem; }.studio-result-loading span { color: #9eb1a4; font-size: .8rem; }.studio-result-loading [data-slot="progress-root"] { width: min(360px, 88%); }.studio-result-loading [data-slot="progress-track"] { height: 7px; background: rgba(229,248,226,.15); }.studio-result-loading [data-slot="progress-indicator"] { background: linear-gradient(90deg,#82c566,#d0ff92); }.result-render-orb { position: relative; width: 83px; height: 83px; display: grid; place-items: center; margin-bottom: 18px; border: 1px solid rgba(201,243,135,.46); border-radius: 25px; color: #d1ff95; background: rgba(15,42,26,.74); box-shadow: 0 0 0 12px rgba(169,229,100,.05),0 18px 42px rgba(0,0,0,.28); transform: translateY(-18px); }.result-render-orb > i { position: absolute; bottom: -23px; width: 7px; border-radius: 99px; background: linear-gradient(#d1ff95,#63b675); animation: importBars 1.15s ease-in-out infinite alternate; }.result-render-orb > i:nth-of-type(1) { left: 22px; height: 20px; }.result-render-orb > i:nth-of-type(2) { left: 38px; height: 34px; animation-delay: -.45s; }.result-render-orb > i:nth-of-type(3) { left: 54px; height: 24px; animation-delay: -.8s; }
 .studio-result-actions .download-button,.studio-result-actions .secondary-button { min-height: 64px; padding-inline: 26px; font-size: 1rem; }
 @media (max-width: 720px) {
   .studio-wizard .primary-button,.studio-wizard .primary-button.small { min-height: 58px; font-size: .95rem; }.studio-wizard .secondary-button { min-height: 50px; font-size: .86rem; }.studio-wizard .source-tabs { height: 48px !important; }.studio-wizard .source-tabs [data-slot="tabs-trigger"] { height: 38px; font-size: .78rem; }
