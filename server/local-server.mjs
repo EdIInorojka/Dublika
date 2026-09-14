@@ -726,6 +726,15 @@ async function checkServiceHealth({ notify = true } = {}) {
       checkedAt: new Date().toISOString(),
       latencyMs: 0,
     },
+    {
+      id: 'youtube-access',
+      label: 'YouTube-доступ',
+      // This is a configuration signal rather than a fake download probe:
+      // YouTube can still challenge an individual request at any time.
+      status: cookieFile || cookieBrowser ? 'ok' : 'not_configured',
+      checkedAt: new Date().toISOString(),
+      latencyMs: 0,
+    },
     await checkConfiguredService('deepgram', 'Deepgram', deepgram.valid, () => fetch('https://api.deepgram.com/v1/projects', {
       headers: { Authorization: `Token ${deepgram.key}` }, signal: AbortSignal.timeout(15_000),
     })),
@@ -1597,7 +1606,7 @@ async function downloadWithYtDlp(value, destination, platform) {
     try { unlinkSync(destination); } catch { /* a partial download is never reused */ }
     console.error(`[dublika] platform import failed: ${String(error.message || error).slice(-1600)}`);
     if (/sign in to confirm|not a bot/i.test(String(error.message || error))) {
-      throw badRequest('YouTube запросил проверку аккаунта. Попробуйте ещё раз или загрузите файл с устройства.');
+      throw badRequest('YouTube временно запросил проверку. Попробуйте другую публичную ссылку или загрузите файл с устройства. Администратор может восстановить импорт, подключив действующую YouTube-сессию на сервере.');
     }
     throw badRequest('Не удалось получить видео из YouTube или VK. Проверьте публичный доступ к ролику или загрузите файл с устройства.');
   }
@@ -1623,6 +1632,7 @@ async function handleApi(request, response, url) {
     stemSeparation: existsSync(demucsPythonPath),
     stemModel: demucsModel,
     ytDlp: existsSync(ytDlpPath),
+    youtubeAccess: cookieFile || cookieBrowser ? 'session_configured' : 'needs_session',
     transcription: deepgram.valid,
     transcriptionProvider: 'deepgram',
     transcriptionIssue: deepgram.key && !deepgram.valid ? 'invalid_key_format' : null,

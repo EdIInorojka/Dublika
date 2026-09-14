@@ -126,19 +126,6 @@ function formatTime(value: number) {
   return `${minutes}:${String(seconds).padStart(2, '0')}.${tenth}`;
 }
 
-function youtubeEmbedUrl(value: string) {
-  try {
-    const url = new URL(value);
-    const host = url.hostname.replace(/^www\./, '').toLowerCase();
-    const id = host === 'youtu.be'
-      ? url.pathname.split('/').filter(Boolean)[0]
-      : url.searchParams.get('v') || (host.endsWith('youtube.com') ? url.pathname.match(/^\/(?:shorts|embed)\/([^/?]+)/)?.[1] : null);
-    return id && /^[\w-]{6,}$/.test(id) ? `https://www.youtube-nocookie.com/embed/${id}?rel=0&modestbranding=1` : '';
-  } catch {
-    return '';
-  }
-}
-
 function AdminPanel({ navigate, darkMode, toggleTheme }: { navigate: Navigate; darkMode: boolean; toggleTheme: () => void }) {
   const [overview, setOverview] = useState<AdminOverview | null>(null);
   const [loading, setLoading] = useState(true);
@@ -687,7 +674,10 @@ export default function Home() {
     const isDirect = /\.(mp4|webm|mov)(\?.*)?$/i.test(value);
     setVideoUrl(isDirect ? value : '');
     setSourceName(value.includes('youtu') ? 'Видео с YouTube' : value.includes('vk') ? 'Видео из VK' : 'Видео по ссылке');
-    setSourceReady(true);
+    // A link is not a usable source until the backend has saved a stable copy.
+    // Keeping this false also prevents the empty timeline from accepting input
+    // while yt-dlp is still fetching the original.
+    setSourceReady(false);
     setWizardStep(2);
     setAnalyzed(false);
     setSegments([]);
@@ -695,13 +685,18 @@ export default function Home() {
     setTranscriptionMode(null);
     setMessage('Загружаем видео по ссылке…');
     const id = await createRemoteProject(value, value.includes('youtu') ? 'Видео с YouTube' : value.includes('vk') ? 'Видео из VK' : 'Видео по ссылке');
-    if (id) setMessage('Видео готово к выбору фрагментов.');
+    if (id) {
+      setSourceReady(true);
+      navigate(`/studio?project=${id}&view=edit`);
+      setMessage('Видео готово к выбору фрагментов.');
+    }
     else {
       // Do not leave a "loaded" project with a decorative empty player after
       // an importer error.  The user can correct the link right on step 01.
       setSourceReady(false);
       setVideoUrl('');
       setWizardStep(1);
+      navigate('/studio');
     }
   }
 
@@ -1450,7 +1445,6 @@ export default function Home() {
   const recordProgress = Math.min(100, recordElapsed / activeRecordingWindow.duration * 100);
   const originalIsPlaying = playback?.kind === 'original' && playback.segmentId === activeSegment;
   const takeIsPlaying = playback?.kind === 'take' && playback.segmentId === activeSegment;
-  const importEmbedUrl = uploading && !videoUrl ? youtubeEmbedUrl(sourceUrl) : '';
   const pageProps = {
     route,
     navigate,
@@ -1541,7 +1535,7 @@ export default function Home() {
                   <input ref={fileInputRef} className="sr-only" type="file" accept="video/mp4,video/webm,video/quicktime,video/x-matroska,video/x-m4v,.mkv,.m4v" onChange={(event) => onFile(event.target.files?.[0])} />
                 </TabsContent>
                 <TabsContent value="link">
-                  <div className="link-panel"><div className="link-input-wrap"><Link2 size={19} /><input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="Ссылка на YouTube, VK Видео или прямой MP4" /></div><button className="primary-button small" type="button" onClick={importLink}>Загрузить <ArrowRight size={17} /></button></div>
+                  <div className="link-panel"><div className="link-input-wrap"><Link2 size={19} /><input value={sourceUrl} disabled={uploading} onChange={(event) => setSourceUrl(event.target.value)} placeholder="Ссылка на YouTube, VK Видео или прямой MP4" /></div><button className="primary-button small" type="button" disabled={uploading} onClick={importLink}>{uploading ? <><span className="loader" /> Загружаем</> : <>Загрузить <ArrowRight size={19} /></>}</button></div>
                   <p className="legal-hint">Прямые ссылки работают сразу. YouTube и VK требуют доступный медиапоток; используйте только контент, на который у вас есть права.</p>
                 </TabsContent>
                 <TabsContent value="demo">
@@ -1550,20 +1544,23 @@ export default function Home() {
               </Tabs>
             </section>}
 
-            {wizardStep === 2 && <section className={`surface editor-card wizard-panel ${!sourceReady ? 'is-muted' : ''}`}>
+            {wizardStep === 2 && <section className={`surface editor-card wizard-panel ${!sourceReady && !uploading ? 'is-muted' : ''}`}>
               <div className="section-header">
                 <div><span className="section-index">02</span><div><h2>Выберите фрагменты</h2><p>До 4 минут суммарно — можно собрать сцену из нескольких моментов</p></div></div>
                 <span className="duration-chip"><Clock3 size={14} /> {formatTime(clipLength)}</span>
               </div>
               <div className="video-stage">
-                {videoUrl ? <video ref={videoRef} src={videoUrl} controls onLoadedMetadata={handleMetadata} onTimeUpdate={() => syncEditorPlayhead(videoRef.current?.currentTime || 0)} onSeeking={() => syncEditorPlayhead(videoRef.current?.currentTime || 0, true)} onPlay={() => { setIsPlaying(true); startEditorPlayheadAnimation(); }} onPause={() => { stopEditorPlayheadAnimation(); syncEditorPlayhead(videoRef.current?.currentTime || 0, true); setIsPlaying(false); }} /> : importEmbedUrl ? (
-                  <iframe className="source-video-embed" src={importEmbedUrl} title="Видео для дубляжа" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen />
-                ) : <div className="stage-loading"><span className="loader" /><span>{uploading ? 'Подготавливаем видео…' : 'Выберите видео'}</span></div>}
-                <div className="stage-topline"><span><FileVideo size={14} /> {sourceReady ? sourceName : 'Видео не выбрано'}</span></div>
+                {uploading ? <div className="import-loading-stage" aria-live="polite" aria-atomic="true">
+                  <div className="import-loading-art" aria-hidden="true"><span /><span /><span /><i><FileVideo size={25} /></i></div>
+                  <div className="import-loading-copy"><span className="import-loading-kicker"><span className="loader" /> импорт</span><strong>{sourceName === 'Видео с YouTube' ? 'Загружаем видео с YouTube' : 'Подготавливаем видео'}</strong><p>Сохраняем поток и создаём монтажную копию.</p></div>
+                  <div className="import-loading-progress" aria-hidden="true"><span /></div>
+                  <div className="import-loading-steps" aria-hidden="true"><span>Получаем видео</span><i /><span>Проверяем файл</span><i /><span>Готовим монтаж</span></div>
+                </div> : videoUrl ? <video ref={videoRef} src={videoUrl} controls onLoadedMetadata={handleMetadata} onTimeUpdate={() => syncEditorPlayhead(videoRef.current?.currentTime || 0)} onSeeking={() => syncEditorPlayhead(videoRef.current?.currentTime || 0, true)} onPlay={() => { setIsPlaying(true); startEditorPlayheadAnimation(); }} onPause={() => { stopEditorPlayheadAnimation(); syncEditorPlayhead(videoRef.current?.currentTime || 0, true); setIsPlaying(false); }} /> : <div className="stage-loading"><span className="loader" /><span>Выберите видео</span></div>}
+                {!uploading && <div className="stage-topline"><span><FileVideo size={14} /> {sourceReady ? sourceName : 'Видео не выбрано'}</span></div>}
               </div>
               <div className="timeline">
                 <div className="timeline-toolbar"><span>{formatTime(trim[0])}</span><div><Scissors size={15} /> Фрагмент {Math.max(1, clips.findIndex((clip) => clip.id === activeClipId) + 1)} из {clips.length}</div><span>{formatTime(trim[1])}</span></div>
-                <button ref={timelineRef} className="filmstrip" type="button" disabled={!sourceReady} onPointerDown={handleTimelinePointerDown} onPointerMove={handleTimelinePointerMove} onPointerUp={handleTimelinePointerUp} onPointerCancel={handleTimelinePointerUp} onKeyDown={(event) => {
+                <button ref={timelineRef} className="filmstrip" type="button" disabled={!sourceReady || uploading} onPointerDown={handleTimelinePointerDown} onPointerMove={handleTimelinePointerMove} onPointerUp={handleTimelinePointerUp} onPointerCancel={handleTimelinePointerUp} onKeyDown={(event) => {
                   if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
                   event.preventDefault();
                   seekEditor(editorPlayhead + (event.key === 'ArrowRight' ? 1 : -1));
