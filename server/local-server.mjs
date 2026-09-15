@@ -57,6 +57,10 @@ const maxConcurrentRenders = Math.max(1, Math.min(8, Number(process.env.DUBLIKA_
 const demucsDevice = String(process.env.DUBLIKA_DEMUCS_DEVICE || 'cpu').trim() || 'cpu';
 const videoPreset = String(process.env.DUBLIKA_VIDEO_PRESET || 'veryfast').trim() || 'veryfast';
 const videoCrf = Math.max(17, Math.min(28, Number(process.env.DUBLIKA_VIDEO_CRF || 21) || 21));
+// Bump this only when the delivered voice/effects balance changes. Existing
+// projects can then receive one sound-only rebuild instead of being stuck
+// with an MP4 that was rendered before the new mix was introduced.
+const audioMixRevision = 7;
 // YouTube may require an authenticated session to pass its anti-bot check.
 // This is opt-in only: set one of the supported browser names in the local
 // environment. yt-dlp reads the browser's encrypted store directly; neither
@@ -275,15 +279,18 @@ function sourceMediaUrl(project) {
 }
 
 function takeMediaUrl(project, segmentId) {
-  return `/media/projects/${project.id}/takes/${segmentId}?access=${encodeURIComponent(signMediaToken(project.id, `take:${segmentId}`))}&realm=${activeStore().realm}`;
+  const revision = project.recordings?.[segmentId]?.createdAt || '';
+  return `/media/projects/${project.id}/takes/${segmentId}?access=${encodeURIComponent(signMediaToken(project.id, `take:${segmentId}`))}&realm=${activeStore().realm}&v=${encodeURIComponent(revision)}`;
 }
 
 function accompanimentMediaUrl(project) {
-  return `/media/projects/${project.id}/background?access=${encodeURIComponent(signMediaToken(project.id, 'background'))}&realm=${activeStore().realm}`;
+  const revision = project.accompaniment?.createdAt || '';
+  return `/media/projects/${project.id}/background?access=${encodeURIComponent(signMediaToken(project.id, 'background'))}&realm=${activeStore().realm}&v=${encodeURIComponent(revision)}`;
 }
 
 function outputMediaUrl(project) {
-  return `/media/outputs/${project.id}.mp4?access=${encodeURIComponent(signMediaToken(project.id, 'output'))}&realm=${activeStore().realm}`;
+  const revision = project.outputUpdatedAt || project.updatedAt || '';
+  return `/media/outputs/${project.id}.mp4?access=${encodeURIComponent(signMediaToken(project.id, 'output'))}&realm=${activeStore().realm}&v=${encodeURIComponent(revision)}`;
 }
 
 function thumbnailMediaUrl(project, index) {
@@ -1467,8 +1474,9 @@ async function analyzeProject(project, body) {
   return { segments: project.segments, clips, transcriptionMode, transcriptionReason };
 }
 
-async function renderProject(user, project) {
-  if (user.credits <= 0 && user.plan === 'Пробный') throw new Error('Бесплатные обработки закончились');
+async function renderProject(user, project, { refreshAudio = false } = {}) {
+  const isSoundRefresh = refreshAudio && Boolean(project.outputPath) && project.audioMixRevision !== audioMixRevision;
+  if (!isSoundRefresh && user.credits <= 0 && user.plan === 'Пробный') throw new Error('Бесплатные обработки закончились');
   const expectedSegments = [...project.segments].sort((left, right) => (left.outputStart ?? left.start) - (right.outputStart ?? right.start));
   const missing = expectedSegments.filter((segment) => !project.recordings?.[segment.id]);
   if (missing.length) throw new Error(`Сначала сохраните все реплики. Не записано: ${missing.map((segment) => segment.id).join(', ')}`);
@@ -1543,8 +1551,10 @@ async function renderProject(user, project) {
   project.progress = 100;
   project.outputPath = outputPath;
   project.outputUrl = `/media/outputs/${project.id}.mp4`;
+  project.outputUpdatedAt = new Date().toISOString();
+  project.audioMixRevision = audioMixRevision;
   project.updatedAt = new Date().toISOString();
-  if (user.plan === 'Пробный') user.credits = Math.max(0, user.credits - 1);
+  if (user.plan === 'Пробный' && !isSoundRefresh) user.credits = Math.max(0, user.credits - 1);
   saveState();
 }
 
@@ -1790,7 +1800,7 @@ async function handleApi(request, response, url) {
   if (!action && !Number.isFinite(segmentId) && request.method === 'GET') {
     const { inputPath: _input, outputPath: _output, recordings, accompaniment: _accompaniment, ...safeProject } = project;
     const segments = project.segments.map((segment) => recordings?.[segment.id] ? { ...segment, audioUrl: takeMediaUrl(project, segment.id) } : segment);
-    return sendJson(response, 200, { project: { ...safeProject, segments, inputUrl: sourceMediaUrl(project), outputUrl: project.outputUrl ? outputMediaUrl(project) : null }, credits: user.credits });
+    return sendJson(response, 200, { project: { ...safeProject, segments, inputUrl: sourceMediaUrl(project), outputUrl: project.outputUrl ? outputMediaUrl(project) : null, canRefreshAudio: Boolean(project.outputPath && project.audioMixRevision !== audioMixRevision) }, credits: user.credits });
   }
   if (action === 'analyze' && request.method === 'POST') {
     // Transcription is a paid external call. Bound it server-side as well as
@@ -1872,7 +1882,7 @@ async function handleApi(request, response, url) {
       project.progress = 2;
       saveState();
       try {
-        await renderProject(user, project);
+        await renderProject(user, project, { refreshAudio: body.refreshAudio === true });
       } catch (error) {
         project.status = 'failed';
         project.error = String(error.message || error).slice(-1000);
@@ -1881,7 +1891,7 @@ async function handleApi(request, response, url) {
     });
     return sendJson(response, 202, { ok: true, status: project.status });
   }
-  if (action === 'status' && request.method === 'GET') return sendJson(response, 200, { status: project.status, progress: project.progress || 0, error: project.error || null, outputUrl: project.outputUrl ? outputMediaUrl(project) : null, credits: user.credits });
+  if (action === 'status' && request.method === 'GET') return sendJson(response, 200, { status: project.status, progress: project.progress || 0, error: project.error || null, outputUrl: project.outputUrl ? outputMediaUrl(project) : null, credits: user.credits, canRefreshAudio: Boolean(project.outputPath && project.audioMixRevision !== audioMixRevision) });
   return sendJson(response, 405, { error: 'Метод не поддерживается' });
 }
 

@@ -259,6 +259,7 @@ export default function Home() {
   const [uploading, setUploading] = useState(false);
   const [, setBackendOnline] = useState(false);
   const [resultUrl, setResultUrl] = useState('');
+  const [canRefreshAudio, setCanRefreshAudio] = useState(false);
   const [credits, setCredits] = useState(() => Number(typeof window !== 'undefined' ? window.localStorage.getItem('dublika-credits') || 3 : 3));
   const [transcriptionMode, setTranscriptionMode] = useState<'transcribed' | 'manual' | 'demo' | null>(null);
   const [textRevision, setTextRevision] = useState(0);
@@ -431,6 +432,7 @@ export default function Home() {
       title: string;
       inputUrl: string;
       outputUrl?: string | null;
+      canRefreshAudio?: boolean;
       status: string;
       trim?: { start: number; end: number } | null;
       clips?: Clip[];
@@ -465,6 +467,7 @@ export default function Home() {
         setWizardStep(requestedView === 'edit' || requestedView === 'fragments' ? 2 : project.segments.length > 0 ? 4 : 2);
         setAssembly(project.status === 'processing' ? 'processing' : project.status === 'done' && project.outputUrl ? 'done' : 'idle');
         setResultUrl(project.outputUrl ? mediaUrl(project.outputUrl) : '');
+        setCanRefreshAudio(Boolean(project.canRefreshAudio));
         setCredits(nextCredits);
         setEditorLevels([]);
         setTimelineThumbnails([]);
@@ -1506,7 +1509,7 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [analyzed, projectId, textRevision]);
 
-  async function assembleVideo() {
+  async function assembleVideo(refreshAudio = false) {
     if (!analyzed) { setMessage('Сначала подготовьте реплики из выбранного отрывка.'); return; }
     if (pendingSegments > 0 || takeUploads > 0) { setMessage('Сначала дождитесь сохранения и записи всех реплик.'); return; }
     if (!projectId) { setMessage('Не удалось открыть проект. Вернитесь к выбору видео и попробуйте ещё раз.'); return; }
@@ -1514,18 +1517,20 @@ export default function Home() {
     setAssembly('processing');
     setAssemblyProgress(1);
     setResultUrl('');
+    setCanRefreshAudio(false);
     navigate(`/studio?project=${projectId}&view=result`);
-    setMessage('Собираем видео…');
+    setMessage(refreshAudio ? 'Обновляем звук…' : 'Собираем видео…');
     try {
-      await apiFetch<{ ok: boolean }>(`/projects/${projectId}/render`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ segments: segments.map(({ id, text }) => ({ id, text })) }) });
+      await apiFetch<{ ok: boolean }>(`/projects/${projectId}/render`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ segments: segments.map(({ id, text }) => ({ id, text })), refreshAudio }) });
       for (let attempt = 0; attempt < 900; attempt += 1) {
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
-        const status = await apiFetch<{ status: string; progress: number; error: string | null; outputUrl: string | null; credits: number }>(`/projects/${projectId}/status`);
+        const status = await apiFetch<{ status: string; progress: number; error: string | null; outputUrl: string | null; credits: number; canRefreshAudio: boolean }>(`/projects/${projectId}/status`);
         setAssemblyProgress(status.progress);
         if (status.status === 'done' && status.outputUrl) {
           activeRenderProjectRef.current = null;
           setAssembly('done');
           setResultUrl(mediaUrl(status.outputUrl));
+          setCanRefreshAudio(status.canRefreshAudio);
           setCredits(status.credits);
           window.localStorage.setItem('dublika-credits', String(status.credits));
           setMessage('Видео готово. Можно скачать и публиковать.');
@@ -1551,12 +1556,13 @@ export default function Home() {
     let cancelled = false;
     const checkStatus = async () => {
       try {
-        const status = await apiFetch<{ status: string; progress: number; error: string | null; outputUrl: string | null; credits: number }>(`/projects/${projectId}/status`);
+        const status = await apiFetch<{ status: string; progress: number; error: string | null; outputUrl: string | null; credits: number; canRefreshAudio: boolean }>(`/projects/${projectId}/status`);
         if (cancelled) return;
         setAssemblyProgress(status.progress);
         if (status.status === 'done' && status.outputUrl) {
           setAssembly('done');
           setResultUrl(mediaUrl(status.outputUrl));
+          setCanRefreshAudio(status.canRefreshAudio);
           setCredits(status.credits);
           window.localStorage.setItem('dublika-credits', String(status.credits));
           setMessage('Видео готово. Можно скачать и публиковать.');
@@ -1677,7 +1683,7 @@ export default function Home() {
               <h1>{assembly === 'done' ? <>Видео собрано.<br /><em>Можно публиковать.</em></> : <>Собираем<br /><em>ваш дубляж.</em></>}</h1>
               <p>{assembly === 'done' ? 'Готовый дубляж — можно скачать и публиковать.' : 'Очищаем голос, бережно возвращаем музыку и собираем MP4.'}</p>
             </div>
-            {assembly === 'done' ? <><div className="studio-result-player"><video src={resultUrl} controls playsInline /></div><div className="studio-result-actions"><button className="download-button" type="button" onClick={downloadResult}><Download size={19} /> Скачать MP4</button><button className="secondary-button" type="button" onClick={() => goToWizardStep(2)}><Scissors size={17} /> Изменить фрагменты</button></div></> : <div className="studio-result-loading" aria-live="polite"><div className="result-render-orb"><FileVideo size={31} /><i /><i /><i /></div><div><strong>Готовим итоговый файл</strong><span>Это окно обновится автоматически.</span></div><Progress value={assemblyProgress} /></div>}
+            {assembly === 'done' ? <><div className="studio-result-player"><video src={resultUrl} controls playsInline /></div><div className="studio-result-actions"><button className="download-button" type="button" onClick={downloadResult}><Download size={19} /> Скачать MP4</button>{canRefreshAudio && <button className="secondary-button" type="button" onClick={() => void assembleVideo(true)}><RefreshCw size={17} /> Пересобрать звук</button>}<button className="secondary-button" type="button" onClick={() => goToWizardStep(2)}><Scissors size={17} /> Изменить фрагменты</button></div></> : <div className="studio-result-loading" aria-live="polite"><div className="result-render-orb"><FileVideo size={31} /><i /><i /><i /></div><div><strong>Готовим итоговый файл</strong><span>Это окно обновится автоматически.</span></div><Progress value={assemblyProgress} /></div>}
           </section>
         ) : <>
         {!showRecordingView && <section className="page-heading">
