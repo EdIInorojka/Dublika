@@ -981,6 +981,19 @@ async function prepareAccompaniment(project, clips) {
   return accompanimentPath;
 }
 
+// The browser receives this cleaned version back for an honest preview of a
+// take. Keep the raw capture separately for the final mix, where it gets the
+// full scene-aware processing chain exactly once.
+async function prepareTakePreview(sourcePath, previewPath) {
+  await runFfmpeg([
+    '-y', '-i', sourcePath, '-vn',
+    '-af', 'aformat=sample_rates=48000:channel_layouts=mono,highpass=f=65,lowpass=f=15500,afftdn=nr=7:nf=-50:tn=1:gs=5,acompressor=threshold=-22dB:ratio=2.2:attack=8:release=260:makeup=1.4,dynaudnorm=f=220:g=7:p=.95:m=8,alimiter=limit=.92,loudnorm=I=-18:TP=-2:LRA=8',
+    '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-movflags', '+faststart', previewPath,
+  ]);
+  if (!existsSync(previewPath) || statSync(previewPath).size < 1024) throw new Error('Не удалось подготовить дорожку предпросмотра');
+  return previewPath;
+}
+
 async function waveformForRange(project, start, end) {
   let samples;
   try {
@@ -1476,7 +1489,7 @@ async function renderProject(user, project) {
   const sourceHasSound = await sourceHasAudio(project.inputPath);
   const accompanimentPath = sourceHasSound ? await prepareAccompaniment(project, clips) : null;
   if (accompanimentPath) args.push('-i', accompanimentPath);
-  recorded.forEach((segment) => args.push('-i', project.recordings[segment.id].path));
+  recorded.forEach((segment) => args.push('-i', project.recordings[segment.id].sourcePath || project.recordings[segment.id].path));
   const sourceVideoLabels = clips.map((clip, index) => `[0:v]trim=start=${clip.start}:end=${clip.end},setpts=PTS-STARTPTS[v${index}]`);
   filters.push(...sourceVideoLabels);
   const sourceVideoLabel = '[vsource]';
@@ -1811,16 +1824,29 @@ async function handleApi(request, response, url) {
     if (!audioExtensions.has(extension)) return sendJson(response, 415, { error: 'Неподдерживаемый аудиоформат' });
     const takePath = join(recordingDir, `${project.id}-${segmentId}-${Date.now()}${extension}`);
     const size = await saveBody(request, takePath, maxAudioBytes);
+    const previewPath = join(recordingDir, `${project.id}-${segmentId}-${Date.now()}-preview.m4a`);
+    let servedTakePath = takePath;
+    try {
+      servedTakePath = await prepareTakePreview(takePath, previewPath);
+    } catch (error) {
+      // Saving the raw capture is safer than throwing a valid take away. The
+      // final render still applies its complete voice-restoration chain.
+      try { unlinkSync(previewPath); } catch { /* no temporary preview left */ }
+      console.warn(`[dublika] take preview processing skipped: ${String(error.message || error).slice(-360)}`);
+    }
     const leadIn = Math.min(recordingLeadSeconds, Math.max(0, Number(request.headers['x-recording-lead-in']) || 0));
     const tailOut = Math.min(recordingTailSeconds, Math.max(0, Number(request.headers['x-recording-tail-out']) || 0));
     const previousTake = project.recordings[segmentId];
-    project.recordings[segmentId] = { path: takePath, size, type, leadIn, tailOut, createdAt: new Date().toISOString() };
+    project.recordings[segmentId] = { path: servedTakePath, sourcePath: takePath, size, type, leadIn, tailOut, createdAt: new Date().toISOString() };
     // A replacement take supersedes the old private recording. Retaining all
     // retries indefinitely both wastes disk and risks an old take being used
     // by an operator accidentally.
-    if (previousTake?.path && previousTake.path !== takePath) {
-      try { unlinkSync(previousTake.path); } catch { /* the new take remains valid */ }
-    }
+    const obsoletePaths = new Set([previousTake?.path, previousTake?.sourcePath].filter(Boolean));
+    obsoletePaths.forEach((path) => {
+      if (path !== takePath && path !== servedTakePath) {
+        try { unlinkSync(path); } catch { /* the new take remains valid */ }
+      }
+    });
     const segment = project.segments.find((item) => item.id === segmentId);
     segment.state = 'ready';
     project.updatedAt = new Date().toISOString();

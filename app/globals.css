@@ -1010,6 +1010,40 @@ h1 em { color: #397c5d; font-style: normal; }
   .studio-wizard .workspace-main > .wizard-stepper { width: 100%; margin: 0 0 12px; }.studio-wizard .workspace-main > .wizard-stepper .step { font-size: .64rem; }.studio-wizard .workspace-main > .wizard-stepper .step-dot { width: 31px; height: 31px; font-size: .66rem; }
 }
 
+/* One continuous project rail for every work step. The back button owns its
+   own space; the three stages divide the remaining width exactly, preventing
+   a broken connector or a detached "Озвучка" label. */
+@media (min-width: 721px) {
+  .studio-wizard .workspace-main > .wizard-stepper {
+    width: 100%;
+    display: grid;
+    grid-template-columns: auto repeat(3, minmax(0, 1fr));
+    column-gap: 0;
+  }
+  .studio-wizard .workspace-main > .wizard-stepper .wizard-back { margin-right: 26px; }
+  .studio-wizard .workspace-main > .wizard-stepper .step { min-width: 0; }
+  .studio-wizard .workspace-main > .wizard-stepper .step:not(:last-child) { grid-template-columns: auto auto minmax(24px, 1fr); }
+  .studio-wizard .workspace-main > .wizard-stepper .step:last-child { justify-self: start; }
+  .studio-wizard .timeline-inputs { align-items: stretch; }
+  .studio-wizard .timeline-reset { align-self: stretch; display: inline-flex; align-items: center; justify-content: center; }
+}
+
+/* Keep the file above its animated bars and make both waiting states clearly
+   alive without creating a distracting layout shift. */
+.import-loading-stage::before, .import-loading-stage::after { animation: loadingOrbit 8s ease-in-out infinite alternate; }
+.import-loading-stage::after { animation-delay: -3.1s; }
+.import-loading-art { height: 112px; padding-bottom: 0; }
+.import-loading-art i { top: -15px; animation: loadingFileFloat 1.9s ease-in-out infinite; }
+.import-loading-art > span { transform-origin: bottom; }
+.studio-result-loading { position: relative; overflow: hidden; }
+.studio-result-loading::before { content: ''; position: absolute; inset: -58%; pointer-events: none; background: conic-gradient(from 0deg, transparent 0 52%, rgba(199,244,92,.11) 58%, transparent 66%); animation: loadingSweep 4.8s linear infinite; }
+.studio-result-loading > * { position: relative; z-index: 1; }
+.result-render-orb { animation: renderOrbFloat 1.8s ease-in-out infinite; }
+@keyframes loadingOrbit { from { transform: rotate(24deg) translateY(-8px); opacity: .5; } to { transform: rotate(40deg) translateY(8px); opacity: 1; } }
+@keyframes loadingFileFloat { 0%,100% { transform: translateX(-50%) translateY(0); } 50% { transform: translateX(-50%) translateY(-8px); } }
+@keyframes loadingSweep { to { transform: rotate(1turn); } }
+@keyframes renderOrbFloat { 0%,100% { transform: translateY(-28px) scale(1); } 50% { transform: translateY(-38px) scale(1.035); } }
+
 .admin-page { min-height: 100dvh; background: radial-gradient(circle at 10% 0, rgba(199,244,92,.16), transparent 28rem), var(--background); }
 .admin-topbar { height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-inline: clamp(18px,4vw,64px); border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--background) 88%, transparent); backdrop-filter: blur(16px); }
 .admin-topbar > div { display: flex; align-items: center; gap: 8px; }

@@ -54,6 +54,9 @@ type SourceKind = 'file' | 'link' | 'demo';
 // until the server has acknowledged that it was saved.
 type SegmentState = 'ready' | 'pending' | 'saving' | 'original';
 type PlaybackState = { kind: 'original' | 'take'; segmentId: number } | null;
+// Preview uses the same relationship as the final mix: accompaniment sits
+// below the voice. These are deliberately automatic, not user controls.
+const automaticPreviewMix = { background: 0.64, voice: 0.96 };
 type RecordingSession = {
   segmentId: number;
   stopReason: 'manual' | 'limit';
@@ -250,8 +253,6 @@ export default function Home() {
   const [liveTranscript, setLiveTranscript] = useState('');
   const [, setTranscriptionState] = useState<'idle' | 'listening' | 'unsupported' | 'error'>('idle');
   const [playback, setPlayback] = useState<PlaybackState>(null);
-  const [originalPreviewVolume, setOriginalPreviewVolume] = useState(72);
-  const [takePreviewVolume, setTakePreviewVolume] = useState(100);
   const [backgroundUrl, setBackgroundUrl] = useState('');
   const [backgroundLoading, setBackgroundLoading] = useState(false);
   const [projectId, setProjectId] = useState<string | null>(null);
@@ -1047,7 +1048,7 @@ export default function Home() {
     if (!url) return;
     const audio = new Audio(url);
     audio.preload = 'auto';
-    audio.volume = originalPreviewVolume / 100;
+    audio.volume = automaticPreviewMix.background;
     try { audio.currentTime = backgroundOffset(segment); } catch { /* browser will apply the seek after metadata */ }
     backgroundAudioRef.current = audio;
     void audio.play().catch(() => undefined);
@@ -1220,7 +1221,7 @@ export default function Home() {
         setCountdown(null);
       }
       const mimeType = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus'].find((type) => MediaRecorder.isTypeSupported(type));
-      const recorder = new MediaRecorder(recordingDestination.stream, mimeType ? { mimeType, audioBitsPerSecond: 160000 } : { audioBitsPerSecond: 160000 });
+      const recorder = new MediaRecorder(recordingDestination.stream, mimeType ? { mimeType, audioBitsPerSecond: 192000 } : { audioBitsPerSecond: 192000 });
       latestLevelsRef.current = Array.from({ length: 96 }, () => 0);
       recordingWaveCursorRef.current = 0;
       recordingChunks.current = [];
@@ -1336,8 +1337,8 @@ export default function Home() {
     const previewWindow = recordingWindow(segment);
     preview.currentTime = Math.min(previewWindow.start, Math.max(0, (preview.duration || previewWindow.end) - 0.2));
     // Preview the separated accompaniment, never the source audio. This is
-    // the same no-vocals stem used by the final render, so the volume slider
-    // controls music and effects without leaking the original dialogue.
+    // the same no-vocals stem used by the final render, so original dialogue
+    // never leaks into the preview.
     preview.muted = true;
     preview.volume = 0;
     startBackgroundTrack(background, segment);
@@ -1393,7 +1394,7 @@ export default function Home() {
     setActiveSegment(item.id);
     const background = await ensurePreviewBackground();
     const audio = new Audio(item.audioUrl);
-    audio.volume = takePreviewVolume / 100;
+    audio.volume = automaticPreviewMix.voice;
     const preview = segmentVideoRef.current;
     const startTake = () => {
       takeAudioRef.current = audio;
@@ -1426,18 +1427,6 @@ export default function Home() {
       preview.volume = 0;
       void preview.play().catch(() => undefined).finally(startTake);
     } else startTake();
-  }
-
-  function changeOriginalPreviewVolume(value: number) {
-    const next = Math.max(0, Math.min(100, Math.round(value)));
-    setOriginalPreviewVolume(next);
-    if (backgroundAudioRef.current) backgroundAudioRef.current.volume = next / 100;
-  }
-
-  function changeTakePreviewVolume(value: number) {
-    const next = Math.max(0, Math.min(100, Math.round(value)));
-    setTakePreviewVolume(next);
-    if (takeAudioRef.current && playback?.kind === 'take') takeAudioRef.current.volume = next / 100;
   }
 
   function handleSegmentVideoPlay() {
@@ -1788,10 +1777,6 @@ export default function Home() {
                       <button className={recording === activeSegment ? 'main-record-control is-recording' : 'main-record-control'} type="button" onClick={() => void toggleRecord(activeSegment)} disabled={countdown !== null || activeLine.state === 'saving'}><span>{recording === activeSegment ? <i /> : <Mic />}</span><strong>{recording === activeSegment ? 'Стоп' : activeLine.state === 'saving' ? 'Сохраняем…' : countdown !== null ? `${countdown}…` : 'Записать'}</strong><small>{recording === activeSegment ? `осталось ${formatTime(recordRemaining)}` : formatTime(activeRecordingWindow.duration)}</small></button>
                       <button className={takeIsPlaying ? 'is-playing' : ''} type="button" onClick={() => void playTake(activeLine)} disabled={!activeLine.audioUrl || recording !== null || backgroundLoading}><span>{takeIsPlaying ? <Pause /> : <Headphones />}</span><strong>{takeIsPlaying ? 'Остановить' : 'Мой дубль'}</strong><small>{backgroundLoading ? 'готовим фон' : takeIsPlaying ? 'идёт воспроизведение' : 'прослушать запись'}</small></button>
                       <button type="button" onClick={nextSegment} disabled={recording !== null || countdown !== null}><span><SkipForward /></span><strong>{allSegmentsFinished ? 'Собрать' : 'Дальше'}</strong><small>{allSegmentsFinished ? 'запустить рендер' : 'следующая реплика'}</small></button>
-                    </div>
-                    <div className="preview-volume-controls" aria-label="Громкость предпросмотра">
-                      <div><span><Music2 /> Фон и эффекты <b>{originalPreviewVolume}%</b></span><Slider value={[originalPreviewVolume]} min={0} max={100} step={1} onValueChange={(value) => changeOriginalPreviewVolume(Array.isArray(value) ? Number(value[0] ?? 0) : Number(value))} aria-label="Громкость музыки и эффектов" /></div>
-                      <div><span><Headphones /> Мой дубль <b>{takePreviewVolume}%</b></span><Slider value={[takePreviewVolume]} min={0} max={100} step={1} onValueChange={(value) => changeTakePreviewVolume(Array.isArray(value) ? Number(value[0] ?? 0) : Number(value))} aria-label="Громкость записанного дубля" /></div>
                     </div>
                   </div>
                   <div className="line-list segment-queue" aria-label="Список реплик">
