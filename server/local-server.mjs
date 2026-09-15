@@ -60,7 +60,7 @@ const videoCrf = Math.max(17, Math.min(28, Number(process.env.DUBLIKA_VIDEO_CRF 
 // Bump this only when the delivered voice/effects balance changes. Existing
 // projects can then receive one sound-only rebuild instead of being stuck
 // with an MP4 that was rendered before the new mix was introduced.
-const audioMixRevision = 8;
+const audioMixRevision = 9;
 // YouTube may require an authenticated session to pass its anti-bot check.
 // This is opt-in only: set one of the supported browser names in the local
 // environment. yt-dlp reads the browser's encrypted store directly; neither
@@ -1528,7 +1528,10 @@ async function renderProject(user, project, { refreshAudio = false } = {}) {
   filters.push(`${takeLabels}amix=inputs=${recorded.length}:duration=longest:normalize=0:dropout_transition=0,alimiter=limit=.76[voice]`);
   if (accompanimentPath) {
     filters.push(`[1:a]atrim=duration=${duration},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=.945[effects]`);
-    filters.push('[voice]asplit=2[voice_sc][voice_mix]');
+    // Apply the voice gain before both the mix and the side-chain detector.
+    // Otherwise the backing stem would still duck as if the voice were loud,
+    // making a quieter dub sound dominant despite its lower mix weight.
+    filters.push('[voice]volume=.7,asplit=2[voice_sc][voice_mix]');
     // Duck only while actual speech is present.  A less aggressive ratio and
     // longer release preserve music/effects without the pumping artefact that
     // sounded like a burst at a cue boundary.
