@@ -987,7 +987,7 @@ async function prepareAccompaniment(project, clips) {
 async function prepareTakePreview(sourcePath, previewPath) {
   await runFfmpeg([
     '-y', '-i', sourcePath, '-vn',
-    '-af', 'aformat=sample_rates=48000:channel_layouts=mono,highpass=f=70,lowpass=f=16000,adeclick=t=2.5,afftdn=nr=8:nf=-52:tn=1:gs=6,deesser=i=.16:m=.35:f=.45,acompressor=threshold=-22dB:ratio=2.2:attack=8:release=260:makeup=1.2,speechnorm=p=.90:e=2.5:c=2.2:r=.001:f=.001:m=.6,alimiter=limit=.88,loudnorm=I=-19:TP=-2:LRA=8,volume=.9',
+    '-af', 'aformat=sample_rates=48000:channel_layouts=mono,highpass=f=70,lowpass=f=16000,adeclick=t=2.5,afftdn=nr=8:nf=-52:tn=1:gs=6,deesser=i=.16:m=.35:f=.45,acompressor=threshold=-22dB:ratio=2.2:attack=8:release=260:makeup=1.2,speechnorm=p=.90:e=2.5:c=2.2:r=.001:f=.001:m=.6,alimiter=limit=.88,loudnorm=I=-20:TP=-2:LRA=8,volume=.8',
     '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-movflags', '+faststart', previewPath,
   ]);
   if (!existsSync(previewPath) || statSync(previewPath).size < 1024) throw new Error('Не удалось подготовить дорожку предпросмотра');
@@ -1510,7 +1510,7 @@ async function renderProject(user, project) {
     // Repair each voice before it reaches the common timeline: remove rumble,
     // clicks, steady noise and harsh sibilants, then level speech without
     // pushing peaks into clipping. The final limiter only guards the mix.
-    filters.push(`[${firstTakeInput + index}:a]aformat=sample_rates=48000:channel_layouts=mono,highpass=f=70,lowpass=f=16000,adeclick=t=2.5,afftdn=nr=8:nf=-52:tn=1:gs=6,deesser=i=.16:m=.35:f=.45,acompressor=threshold=-22dB:ratio=2.2:attack=8:release=260:makeup=1.2,speechnorm=p=.90:e=2.5:c=2.2:r=.001:f=.001:m=.6,alimiter=limit=.88,atrim=start=${leadIn.toFixed(3)}:end=${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${edgeFade.toFixed(3)},afade=t=out:st=${fadeOutAt.toFixed(3)}:d=${edgeFade.toFixed(3)},volume=.9,adelay=${delay}:all=1[t${index}]`);
+    filters.push(`[${firstTakeInput + index}:a]aformat=sample_rates=48000:channel_layouts=mono,highpass=f=70,lowpass=f=16000,adeclick=t=2.5,afftdn=nr=8:nf=-52:tn=1:gs=6,deesser=i=.16:m=.35:f=.45,acompressor=threshold=-22dB:ratio=2.2:attack=8:release=260:makeup=1.2,speechnorm=p=.90:e=2.5:c=2.2:r=.001:f=.001:m=.6,alimiter=limit=.88,atrim=start=${leadIn.toFixed(3)}:end=${takeEnd.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${edgeFade.toFixed(3)},afade=t=out:st=${fadeOutAt.toFixed(3)}:d=${edgeFade.toFixed(3)},volume=.8,adelay=${delay}:all=1[t${index}]`);
   });
   const takeLabels = recorded.map((_, index) => `[t${index}]`).join('');
   // Every take is delayed onto its one flattened output timeline.  Because
@@ -1529,9 +1529,9 @@ async function renderProject(user, project) {
     // mixed. The final limiter prevents an abrupt peak when two consonants
     // meet at a cue boundary, while loudnorm keeps all finished videos at a
     // stable listening level.
-    filters.push("[ducked][voice_mix]amix=inputs=2:duration=first:normalize=0:dropout_transition=0:weights='0.84 .90',loudnorm=I=-16:TP=-1.5:LRA=9,alimiter=limit=.92[aout]");
+    filters.push("[ducked][voice_mix]amix=inputs=2:duration=first:normalize=0:dropout_transition=0:weights='0.84 .80',loudnorm=I=-16:TP=-1.5:LRA=9,alimiter=limit=.92[aout]");
   } else {
-    filters.push('[voice]loudnorm=I=-17:TP=-1.5:LRA=11,alimiter=limit=.92[aout]');
+    filters.push('[voice]loudnorm=I=-18:TP=-1.5:LRA=11,alimiter=limit=.92[aout]');
   }
   args.push('-filter_complex', filters.join(';'));
   args.push('-map', sourceVideoLabel, '-map', '[aout]', '-c:v', 'libx264', '-preset', videoPreset, '-crf', String(videoCrf), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-b:a', '192k', '-t', String(duration), '-movflags', '+faststart', '-max_muxing_queue_size', '2048', '-progress', 'pipe:2', '-nostats', outputPath);
