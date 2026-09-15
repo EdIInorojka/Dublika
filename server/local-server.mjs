@@ -60,7 +60,7 @@ const videoCrf = Math.max(17, Math.min(28, Number(process.env.DUBLIKA_VIDEO_CRF 
 // Bump this only when the delivered voice/effects balance changes. Existing
 // projects can then receive one sound-only rebuild instead of being stuck
 // with an MP4 that was rendered before the new mix was introduced.
-const audioMixRevision = 7;
+const audioMixRevision = 8;
 // YouTube may require an authenticated session to pass its anti-bot check.
 // This is opt-in only: set one of the supported browser names in the local
 // environment. yt-dlp reads the browser's encrypted store directly; neither
@@ -1537,9 +1537,9 @@ async function renderProject(user, project, { refreshAudio = false } = {}) {
     // mixed. The final limiter prevents an abrupt peak when two consonants
     // meet at a cue boundary, while loudnorm keeps all finished videos at a
     // stable listening level.
-    filters.push("[ducked][voice_mix]amix=inputs=2:duration=first:normalize=0:dropout_transition=0:weights='0.945 .70',loudnorm=I=-16:TP=-1.5:LRA=9,alimiter=limit=.92[aout]");
+    filters.push("[ducked][voice_mix]amix=inputs=2:duration=first:normalize=0:dropout_transition=0:weights='0.945 .49',loudnorm=I=-16:TP=-1.5:LRA=9,alimiter=limit=.92[aout]");
   } else {
-    filters.push('[voice]loudnorm=I=-19:TP=-1.5:LRA=11,alimiter=limit=.92[aout]');
+    filters.push('[voice]loudnorm=I=-22:TP=-1.5:LRA=11,alimiter=limit=.92[aout]');
   }
   args.push('-filter_complex', filters.join(';'));
   args.push('-map', sourceVideoLabel, '-map', '[aout]', '-c:v', 'libx264', '-preset', videoPreset, '-crf', String(videoCrf), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-b:a', '192k', '-t', String(duration), '-movflags', '+faststart', '-max_muxing_queue_size', '2048', '-progress', 'pipe:2', '-nostats', outputPath);

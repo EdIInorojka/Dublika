@@ -56,7 +56,7 @@ type SegmentState = 'ready' | 'pending' | 'saving' | 'original';
 type PlaybackState = { kind: 'original' | 'take'; segmentId: number } | null;
 // Preview uses the same relationship as the final mix: accompaniment sits
 // below the voice. These are deliberately automatic, not user controls.
-const automaticPreviewMix = { background: 0.672, voice: 0.7 };
+const automaticPreviewMix = { background: 0.672, voice: 0.49 };
 type RecordingSession = {
   segmentId: number;
   stopReason: 'manual' | 'limit';
