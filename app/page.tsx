@@ -56,7 +56,7 @@ type SegmentState = 'ready' | 'pending' | 'saving' | 'original';
 type PlaybackState = { kind: 'original' | 'take'; segmentId: number } | null;
 // Preview uses the same relationship as the final mix: accompaniment sits
 // below the voice. These are deliberately automatic, not user controls.
-const automaticPreviewMix = { background: 0.64, voice: 0.96 };
+const automaticPreviewMix = { background: 0.64, voice: 0.864 };
 type RecordingSession = {
   segmentId: number;
   stopReason: 'manual' | 'limit';
@@ -1210,8 +1210,12 @@ export default function Home() {
       compressor.ratio.value = 2.2;
       compressor.attack.value = .006;
       compressor.release.value = .18;
+      // Leave headroom before Opus encoding. This is the requested 10% voice
+      // reduction and prevents phone microphones from flattening consonants.
+      const outputGain = recordingContext.createGain();
+      outputGain.gain.value = .9;
       const recordingDestination = recordingContext.createMediaStreamDestination();
-      microphone.connect(highpass).connect(lowpass).connect(compressor).connect(recordingDestination);
+      microphone.connect(highpass).connect(lowpass).connect(compressor).connect(outputGain).connect(recordingDestination);
       audioContextRef.current = recordingContext;
       if (countdownEnabled) {
         for (const value of [3, 2, 1]) {
