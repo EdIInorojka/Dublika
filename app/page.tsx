@@ -1332,20 +1332,22 @@ export default function Home() {
     const segment = segments.find((item) => item.id === activeSegment);
     const preview = segmentVideoRef.current;
     if (!segment || !preview) return;
+    // Before the user records this cue, the useful reference is the untouched
+    // source — dialogue, music and effects together. Once a take exists,
+    // the same preview becomes the actual dubbing mix (handled by playTake).
+    if (segment.audioUrl) {
+      await playTake(segment);
+      return;
+    }
     if (playback?.kind === 'original' && playback.segmentId === segment.id && !preview.paused) {
       stopPlayback();
       return;
     }
     stopPlayback();
-    const background = await ensurePreviewBackground();
     const previewWindow = recordingWindow(segment);
     preview.currentTime = Math.min(previewWindow.start, Math.max(0, (preview.duration || previewWindow.end) - 0.2));
-    // Preview the separated accompaniment, never the source audio. This is
-    // the same no-vocals stem used by the final render, so original dialogue
-    // never leaks into the preview.
-    preview.muted = true;
-    preview.volume = 0;
-    startBackgroundTrack(background, segment);
+    preview.muted = false;
+    preview.volume = 1;
     setPlayback({ kind: 'original', segmentId: segment.id });
     void preview.play().catch(() => setPlayback(null));
     playbackStopTimeoutRef.current = window.setTimeout(stopPlayback, Math.max(350, (previewWindow.end - previewWindow.start) * 1000));
@@ -1769,7 +1771,7 @@ export default function Home() {
                     <div className="segment-video-wrap">
                       <video ref={segmentVideoRef} src={videoUrl} playsInline preload="auto" onPlay={handleSegmentVideoPlay} onPause={handleSegmentVideoPause} onSeeking={handleSegmentVideoSeeking} onTimeUpdate={handleSegmentVideoTimeUpdate} />
                       <div className="segment-video-badge"><ListVideo /> {formatTime(activeLine.start)} — {formatTime(activeLine.end)}</div>
-                      <button className="segment-preview-toggle" type="button" onClick={() => void replayOriginal()} disabled={recording !== null || countdown !== null || backgroundLoading}>{originalIsPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}<span>{backgroundLoading ? 'Готовим фон…' : originalIsPlaying ? 'Остановить' : 'Посмотреть фрагмент'}</span></button>
+                      <button className="segment-preview-toggle" type="button" onClick={() => void replayOriginal()} disabled={recording !== null || countdown !== null || backgroundLoading}>{(activeLine.audioUrl ? takeIsPlaying : originalIsPlaying) ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}<span>{backgroundLoading ? 'Готовим фон…' : (activeLine.audioUrl ? takeIsPlaying : originalIsPlaying) ? 'Остановить' : activeLine.audioUrl ? 'Послушать дубль' : 'Посмотреть фрагмент'}</span></button>
                       {countdown !== null && <div className="record-countdown"><span>{countdown}</span><small>приготовьтесь</small></div>}
                     </div>
                     <div className="active-caption"><span>Реплика {activeSegment}</span><textarea rows={2} value={activeLine.text} onChange={(event) => updateText(activeLine.id, event.target.value)} placeholder="Введите текст реплики" aria-label="Текст активной реплики" /></div>
